@@ -7,6 +7,9 @@
     - Every item row shows the exact number and its share (%) of total blocks
     - Bottom-left, semi-transparent white UI, springy drag, press ripple + bounce
     - Toggle: RightShift (PC)  |  "-" minimize  |  "X" close
+    - NEW: Slots tab -> "Find" bar: type a slot name (partial match), it is saved to a local file
+      and the script hops to a NEW server each time until somebody has a matching slot, then stops.
+      Leaving the game mid-search cancels it; after rejoining it only continues if you press Find.
 ]]
 
 -- ========================= CONFIG =========================
@@ -19,6 +22,21 @@ local Config = {
     ToggleKey = Enum.KeyCode.RightShift,
     Glass = 0.12,   -- window transparency (0 = solid, 1 = invisible); panels/cards follow it
     Scale = 0.85,   -- max UI size (1 = full size); it also auto-shrinks on small screens
+
+    -- ---------- Slot finder (server hop) ----------
+    FindFile = "InventoryTracker_find.json",  -- local save file (executor workspace folder)
+    -- The script must reload itself after every teleport. Use ONE of these:
+    --   ScriptUrl : raw link of this script (loadstring(game:HttpGet(url)))
+    --   ScriptFile: save this script in your executor's workspace folder with this exact name
+    ScriptUrl = "",
+    ScriptFile = "InventoryTracker.lua",
+    SearchSelf = false,     -- also search your own slots in each server
+    ScanMinStay = 2.5,      -- seconds to wait in a server before giving up on it (if data is loaded)
+    ScanTimeout = 9,        -- max seconds to wait for slot data to load in a server
+    ArriveDelay = 1.5,      -- extra wait after joining a server before scanning
+    ResumeWindow = 120,     -- auto-continue only if the hop happened less than this many seconds ago
+    TeleportTimeout = 25,   -- seconds before a stuck teleport is retried with another server
+    ServerPages = 3,        -- pages of 100 servers to read from the server list
 }
 
 -- ========================= SERVICES =========================
@@ -27,6 +45,9 @@ local CoreGui = game:GetService("CoreGui")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+local StarterGui = game:GetService("StarterGui")
 
 local GUI_NAME = "InventoryTrackerGui"
 
@@ -789,6 +810,30 @@ local EmptyLabel = label({Text = "Select a player on the left", TextColor3 = C.s
     TextXAlignment = Enum.TextXAlignment.Center, TextWrapped = true,
     Size = UDim2.new(1, -20, 1, 0), Position = UDim2.new(0, 10, 0, 0)}, ListHolder)
 
+-- slot finder bar (only visible on the Slots tab)
+local FindBar = new("Frame", {
+    Name = "FindBar", Position = UDim2.new(0, 0, 0, 182), Size = UDim2.new(1, 0, 0, 32),
+    BackgroundTransparency = 1, Visible = false,
+}, Content)
+local FindBox = new("TextBox", {
+    Name = "FindBox", Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(0, 150, 1, 0),
+    BackgroundColor3 = C.panel, BorderSizePixel = 0, Font = FONT, TextSize = 12,
+    TextColor3 = C.text, PlaceholderText = "Find slot name...", PlaceholderColor3 = C.sub,
+    Text = "", ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left,
+}, FindBar)
+corner(FindBox, 8)
+new("UIPadding", {PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10)}, FindBox)
+local FindBtn = new("TextButton", {
+    Text = "Find", Font = FONT_B, TextSize = 12, TextColor3 = rgb(255, 255, 255), AutoButtonColor = false,
+    BackgroundColor3 = C.accent, BorderSizePixel = 0,
+    Position = UDim2.new(0, 156, 0, 0), Size = UDim2.new(0, 64, 1, 0),
+}, FindBar)
+corner(FindBtn, 8)
+pressFx(FindBtn)
+local FindStatus = label({Text = "", TextSize = 10, TextColor3 = C.sub, TextWrapped = true,
+    TextYAlignment = Enum.TextYAlignment.Center,
+    Position = UDim2.new(0, 228, 0, 0), Size = UDim2.new(1, -228, 1, 0)}, FindBar)
+
 -- ========================= UI LOGIC =========================
 local function setListMessage(text)
     if text then
@@ -1188,6 +1233,9 @@ local function refreshTabVisuals()
     local items = currentTab == "Items"
     SortBtn.Visible = items
     SearchBar.Size = items and UDim2.new(1, -228, 0, 28) or UDim2.new(1, -136, 0, 28)
+    FindBar.Visible = not items
+    ListHolder.Position = items and UDim2.new(0, 0, 0, 182) or UDim2.new(0, 0, 0, 220)
+    ListHolder.Size = items and UDim2.new(1, 0, 1, -182) or UDim2.new(1, 0, 1, -220)
 end
 
 local function setTab(tab)
@@ -1338,6 +1386,328 @@ local function removePlayerRow(player)
     end
 end
 
+-- ========================= SLOT FINDER (SERVER HOP) =========================
+local hasFS = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
+
+local function trim(str)
+    return (str:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function newFindState()
+    return {query = "", active = false, visited = {}, hops = 0, hopAt = 0, placeId = 0, foundJob = ""}
+end
+
+local findState = newFindState()
+do
+    if hasFS then
+        local ok, data = pcall(function()
+            if isfile(Config.FindFile) then
+                return HttpService:JSONDecode(readfile(Config.FindFile))
+            end
+        end)
+        if ok and type(data) == "table" then
+            for k in pairs(findState) do
+                if data[k] ~= nil then findState[k] = data[k] end
+            end
+        end
+    end
+    if type(findState.visited) ~= "table" then findState.visited = {} end
+end
+
+local function saveFindState()
+    if not hasFS then return end
+    pcall(function()
+        writefile(Config.FindFile, HttpService:JSONEncode(findState))
+    end)
+end
+
+-- did this execution come from our own teleport? (set by the queued bootstrap, one-shot)
+local resumeFlag = false
+pcall(function()
+    local env = getgenv()
+    resumeFlag = (env.__InvTrackerResume == true)
+    env.__InvTrackerResume = nil
+end)
+
+local finding = false
+local findToken = 0
+local teleportFailed = false
+local queuedThisSession = false
+
+local function getQueueFn()
+    local ok, fn = pcall(function()
+        return queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport)
+            or (fluxus and fluxus.queue_on_teleport)
+    end)
+    if ok and type(fn) == "function" then return fn end
+    return nil
+end
+
+local function getBootstrap()
+    local pre = "getgenv().__InvTrackerResume = true\n"
+    if Config.ScriptUrl ~= "" then
+        return pre .. "loadstring(game:HttpGet(\"" .. Config.ScriptUrl .. "\"))()"
+    end
+    local ok, exists = pcall(function() return hasFS and isfile(Config.ScriptFile) end)
+    if ok and exists then
+        return pre .. "loadstring(readfile(\"" .. Config.ScriptFile .. "\"))()"
+    end
+    return nil
+end
+
+local function httpGet(url)
+    local ok, res = pcall(function() return game:HttpGet(url) end)
+    if ok and type(res) == "string" and res ~= "" then return res end
+    local ok2, req = pcall(function() return request or http_request or (syn and syn.request) end)
+    if ok2 and type(req) == "function" then
+        local ok3, r = pcall(req, {Url = url, Method = "GET"})
+        if ok3 and type(r) == "table" and type(r.Body) == "string" and r.Body ~= "" then
+            return r.Body
+        end
+    end
+    return nil
+end
+
+local function setFindStatus(text, color)
+    FindStatus.Text = text
+    FindStatus.TextColor3 = color or C.sub
+end
+
+local function setFinding(on)
+    finding = on
+    FindBtn.Text = on and "Stop" or "Find"
+    FindBtn.BackgroundColor3 = on and C.bad or C.accent
+end
+
+local function stopFind(msg, color)
+    findToken = findToken + 1
+    setFinding(false)
+    findState.active = false
+    saveFindState()
+    setFindStatus(msg or "Stopped", color or C.sub)
+end
+
+-- look through every player's OtherData slots for the query (partial, case-insensitive)
+local function scanServer(q, token)
+    local lp = Players.LocalPlayer
+    local t0 = os.clock()
+    while token == findToken do
+        local total, ready = 0, 0
+        for _, pl in ipairs(Players:GetPlayers()) do
+            if pl ~= lp or Config.SearchSelf then
+                total = total + 1
+                local od = pl:FindFirstChild("OtherData")
+                local hasSlots = false
+                if od then
+                    for _, v in ipairs(od:GetChildren()) do
+                        if v:IsA("ValueBase") and string.match(v.Name, "^NameOfSlot%d*$") then
+                            hasSlots = true
+                            local text = tostring(v.Value)
+                            if text ~= "" and string.find(string.lower(text), q, 1, true) then
+                                return pl, v
+                            end
+                        end
+                    end
+                end
+                if hasSlots then ready = ready + 1 end
+            end
+        end
+        if total == 0 then return nil end   -- nobody else here
+        local elapsed = os.clock() - t0
+        if elapsed >= Config.ScanTimeout or (ready == total and elapsed >= Config.ScanMinStay) then
+            return nil
+        end
+        task.wait(0.4)
+    end
+    return nil
+end
+
+-- returns server, nil  |  nil, "http"  |  nil, "empty"
+local function pickServer(token)
+    local visited = findState.visited
+    local pool = {}
+    local cursor
+    local gotAny = false
+    for _ = 1, Config.ServerPages do
+        if token ~= findToken then return nil, "http" end
+        local url = "https://games.roblox.com/v1/games/" .. tostring(game.PlaceId)
+            .. "/servers/Public?sortOrder=Desc&limit=100"
+        if cursor then url = url .. "&cursor=" .. cursor end
+        local body = httpGet(url)
+        if not body then break end
+        local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+        if not ok or type(data) ~= "table" or type(data.data) ~= "table" then break end
+        gotAny = true
+        for _, sv in ipairs(data.data) do
+            local playing, maxP = sv.playing or 0, sv.maxPlayers or 0
+            if sv.id ~= game.JobId and not visited[sv.id] and playing >= 1 and playing < maxP then
+                table.insert(pool, sv)
+            end
+        end
+        cursor = data.nextPageCursor
+        if not cursor or #pool >= 25 then break end
+    end
+    if #pool > 0 then
+        return pool[math.random(#pool)], nil
+    end
+    return nil, gotAny and "empty" or "http"
+end
+
+local function onFound(pl, v)
+    findToken = findToken + 1
+    setFinding(false)
+    findState.active = false
+    findState.foundJob = game.JobId
+    saveFindState()
+
+    local text = tostring(v.Value)
+    local slotNo = tonumber(string.match(v.Name, "%d+$")) or 1
+    local slotName = (slotNo > 1) and ("Slot Name " .. slotNo) or "Slot Name"
+    setFindStatus(string.format("FOUND  %s  -  %s: %s", pl.DisplayName, slotName, text), C.good)
+
+    -- show it in the list
+    if currentTab ~= "Slots" then setTab("Slots") end
+    selectPlayer(pl)
+    SearchBar.Text = findState.query
+
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = "Inventory Tracker",
+            Text = "Found \"" .. text .. "\" on " .. pl.DisplayName,
+            Duration = 10,
+        })
+    end)
+end
+
+local function runFind(token, skipFirstScan)
+    local q = string.lower(findState.query)
+    local first = true
+    while token == findToken do
+        -- 1) scan this server
+        if not (first and skipFirstScan) then
+            setFindStatus(string.format("Scanning this server...  (hops: %d)", findState.hops), C.warn)
+            local pl, v = scanServer(q, token)
+            if token ~= findToken then return end
+            if pl then
+                onFound(pl, v)
+                return
+            end
+        end
+        first = false
+
+        -- 2) choose a server we have not visited yet
+        setFindStatus("Looking for a new server...", C.warn)
+        local server, why = pickServer(token)
+        if token ~= findToken then return end
+        if not server then
+            if why == "empty" then
+                findState.visited = {}
+                saveFindState()
+                setFindStatus("Visited every listed server, restarting the list...", C.warn)
+                task.wait(3)
+            else
+                setFindStatus("Server list unavailable (rate limit?), retrying...", C.warn)
+                task.wait(6)
+            end
+            continue
+        end
+
+        -- 3) hop
+        local n = 0
+        for _ in pairs(findState.visited) do n = n + 1 end
+        if n > 3000 then findState.visited = {} end
+        findState.visited[game.JobId] = true
+        findState.visited[server.id] = true
+        findState.hops = findState.hops + 1
+        findState.hopAt = os.time()
+        findState.placeId = game.PlaceId
+        findState.active = true
+        saveFindState()
+
+        teleportFailed = false
+        setFindStatus(string.format("Teleporting to a new server...  (hop #%d)", findState.hops), C.accent)
+        local ok = pcall(function()
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, Players.LocalPlayer)
+        end)
+        local t0 = os.clock()
+        while token == findToken and ok and not teleportFailed and os.clock() - t0 < Config.TeleportTimeout do
+            task.wait(0.25)
+        end
+        if token ~= findToken then return end
+        setFindStatus("Teleport failed, trying another server...", C.warn)
+        task.wait(1.5)
+    end
+end
+
+local function startFind(resuming)
+    local raw = resuming and findState.query or trim(FindBox.Text)
+    if raw == "" then
+        setFindStatus("Type a slot name first", C.warn)
+        return
+    end
+    if not hasFS then
+        setFindStatus("This executor has no file functions (writefile/readfile)", C.bad)
+        return
+    end
+    local queueFn = getQueueFn()
+    if not queueFn then
+        setFindStatus("This executor has no queue_on_teleport", C.bad)
+        return
+    end
+    local bootstrap = getBootstrap()
+    if not bootstrap then
+        setFindStatus("Set Config.ScriptUrl, or save this script in the workspace as " .. Config.ScriptFile, C.bad)
+        return
+    end
+
+    local sameQuery = (findState.query == raw)
+    if not sameQuery then
+        findState.visited = {}
+        findState.hops = 0
+        findState.foundJob = ""
+    end
+    findState.query = raw
+    findState.active = true
+    findState.placeId = game.PlaceId
+    findState.hopAt = os.time()
+    saveFindState()                       -- keep the name in the local file
+
+    if not queuedThisSession then
+        local ok = pcall(queueFn, bootstrap)
+        if not ok then
+            findState.active = false
+            saveFindState()
+            setFindStatus("queue_on_teleport failed", C.bad)
+            return
+        end
+        queuedThisSession = true
+    end
+
+    findToken = findToken + 1
+    local token = findToken
+    setFinding(true)
+    -- pressing Find again inside the server where it was already found -> skip that server
+    local skip = (not resuming) and sameQuery and findState.foundJob == game.JobId
+    task.spawn(runFind, token, skip)
+end
+
+track(TeleportService.TeleportInitFailed:Connect(function()
+    teleportFailed = true
+end))
+
+track(FindBtn.MouseButton1Click:Connect(function()
+    if finding then
+        stopFind("Stopped.  Saved: \"" .. findState.query .. "\"", C.sub)
+    else
+        startFind(false)
+    end
+end))
+track(FindBox.FocusLost:Connect(function(enter)
+    if enter and not finding then startFind(false) end
+end))
+
+if findState.query ~= "" then FindBox.Text = findState.query end
+
 -- ========================= WINDOW BUTTONS =========================
 local minimized = false
 track(MinBtn.MouseButton1Click:Connect(function()
@@ -1353,6 +1723,7 @@ track(MinBtn.MouseButton1Click:Connect(function()
 end))
 
 local function cleanup()
+    findToken = findToken + 1   -- stops a running search loop (in memory only, the file is untouched)
     for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
     connections = {}
     for _, c in ipairs(liveConnections) do pcall(function() c:Disconnect() end) end
@@ -1360,7 +1731,10 @@ local function cleanup()
     for player in pairs(trackers) do stopTracker(player) end
     if ScreenGui then ScreenGui:Destroy() end
 end
-track(CloseBtn.MouseButton1Click:Connect(cleanup))
+track(CloseBtn.MouseButton1Click:Connect(function()
+    if finding then stopFind("Stopped") end
+    cleanup()
+end))
 
 track(UserInputService.InputBegan:Connect(function(input, processed)
     if processed then return end
@@ -1383,6 +1757,30 @@ end
 
 -- pop-in
 bounce(WindowScale, 0.55, {Scale = uiScale})
+
+-- slot finder: continue ONLY if we just arrived through our own hop; a normal join / re-execute stays paused
+do
+    local canResume = resumeFlag and findState.active and findState.query ~= ""
+        and findState.placeId == game.PlaceId
+        and (os.time() - (tonumber(findState.hopAt) or 0)) <= Config.ResumeWindow
+    if canResume then
+        task.spawn(function()
+            if not game:IsLoaded() then game.Loaded:Wait() end
+            task.wait(Config.ArriveDelay)
+            if not ScreenGui.Parent then return end
+            setTab("Slots")
+            startFind(true)
+        end)
+    else
+        if findState.active then
+            findState.active = false
+            saveFindState()
+        end
+        if findState.query ~= "" then
+            setFindStatus(string.format("Paused. Saved: \"%s\"  -  press Find to continue", findState.query), C.sub)
+        end
+    end
+end
 
 pcall(function()
     getgenv().__InvTrackerCleanup = cleanup
