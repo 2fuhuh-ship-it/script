@@ -1,3 +1,7 @@
+-- Inventory Tracker (auto-save loader)
+-- Run THIS file once: it saves the full script into your executor workspace as
+-- "InventoryTracker.lua" (needed by the server-hop finder) and then starts it.
+local SRC = [==[
 --[[
     Inventory Tracker v2  (Delta / Luau)  -  white glass edition
     - Player list with avatars, sorted by total blocks
@@ -1785,3 +1789,16 @@ end
 pcall(function()
     getgenv().__InvTrackerCleanup = cleanup
 end)
+
+]==]
+
+pcall(function()
+    if writefile then writefile("InventoryTracker.lua", SRC) end
+end)
+
+local fn, err = loadstring(SRC)
+if fn then
+    fn()
+else
+    warn("Inventory Tracker load error: " .. tostring(err))
+end
