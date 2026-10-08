@@ -1,6 +1,6 @@
--- Inventory Tracker (auto-save loader)
--- Run THIS file once: it saves the full script into your executor workspace as
--- "InventoryTracker.lua" (needed by the server-hop finder) and then starts it.
+-- Inventory Tracker (loader)
+-- Run THIS file. It keeps the full script in memory (for the server-hop finder)
+-- and also saves a copy to your workspace as "InventoryTracker.lua".
 local SRC = [==[
 --[[
     Inventory Tracker v2  (Delta / Luau)  -  white glass edition
@@ -1452,6 +1452,13 @@ local function getBootstrap()
     if Config.ScriptUrl ~= "" then
         return pre .. "loadstring(game:HttpGet(\"" .. Config.ScriptUrl .. "\"))()"
     end
+    -- preferred: the loader leaves the full source in getgenv, so no file is needed
+    local OPEN, CLOSE = "[" .. "==[", "]" .. "==]"   -- built in pieces so they never end a long string early
+    local okS, embedded = pcall(function() return getgenv().__InvTrackerSrc end)
+    if okS and type(embedded) == "string" and embedded ~= "" and not string.find(embedded, CLOSE, 1, true) then
+        return pre .. "getgenv().__InvTrackerSrc = " .. OPEN .. "\n" .. embedded .. "\n" .. CLOSE
+            .. "\nloadstring(getgenv().__InvTrackerSrc)()"
+    end
     local ok, exists = pcall(function() return hasFS and isfile(Config.ScriptFile) end)
     if ok and exists then
         return pre .. "loadstring(readfile(\"" .. Config.ScriptFile .. "\"))()"
@@ -1660,7 +1667,7 @@ local function startFind(resuming)
     end
     local bootstrap = getBootstrap()
     if not bootstrap then
-        setFindStatus("Set Config.ScriptUrl, or save this script in the workspace as " .. Config.ScriptFile, C.bad)
+        setFindStatus("Run InventoryTracker_loader.lua (not the plain script), or set Config.ScriptUrl", C.bad)
         return
     end
 
@@ -1792,6 +1799,7 @@ end)
 
 ]==]
 
+pcall(function() getgenv().__InvTrackerSrc = SRC end)
 pcall(function()
     if writefile then writefile("InventoryTracker.lua", SRC) end
 end)
