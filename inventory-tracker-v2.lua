@@ -1,10 +1,11 @@
 --[[
-    Inventory Tracker v2  (Delta / Luau)
+    Inventory Tracker v2  (Delta / Luau)  -  white glass edition
     - Player list with avatars, sorted by total blocks
     - Header card: avatar, rank badge, rank progress (exact "to go" + %)
     - Stat cards: Blocks / Gold / Item Types (full number + short form)
     - Items / Slots tabs, search, sort (Amount / A-Z)
     - Every item row shows the exact number and its share (%) of total blocks
+    - Bottom-left, semi-transparent white UI, springy drag, press ripple + bounce
     - Toggle: RightShift (PC)  |  "-" minimize  |  "X" close
 ]]
 
@@ -16,6 +17,8 @@ local Config = {
     AutoSelectSelf = true,
     ShakeFx = true,
     ToggleKey = Enum.KeyCode.RightShift,
+    Glass = 0.12,   -- window transparency (0 = solid, 1 = invisible); panels/cards follow it
+    Scale = 0.85,   -- max UI size (1 = full size); it also auto-shrinks on small screens
 }
 
 -- ========================= SERVICES =========================
@@ -23,6 +26,7 @@ local Players = game:GetService("Players")
 local CoreGui = game:GetService("CoreGui")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
 
 local GUI_NAME = "InventoryTrackerGui"
 
@@ -54,19 +58,26 @@ end
 local function rgb(r, g, b) return Color3.fromRGB(r, g, b) end
 
 local C = {
-    bg     = rgb(16, 18, 26),
-    panel  = rgb(24, 27, 38),
-    card   = rgb(33, 37, 52),
-    cardHi = rgb(46, 52, 76),
-    hover  = rgb(40, 45, 64),
-    line   = rgb(58, 64, 88),
-    text   = rgb(238, 241, 250),
-    sub    = rgb(140, 148, 175),
-    accent = rgb(94, 140, 255),
-    gold   = rgb(255, 196, 64),
-    good   = rgb(70, 220, 130),
-    warn   = rgb(255, 190, 60),
-    bad    = rgb(255, 90, 90),
+    bg     = rgb(255, 255, 255),
+    panel  = rgb(242, 245, 251),
+    card   = rgb(250, 251, 255),
+    cardHi = rgb(219, 230, 255),
+    hover  = rgb(234, 239, 250),
+    line   = rgb(205, 211, 226),
+    text   = rgb(28, 32, 46),
+    sub    = rgb(112, 120, 144),
+    accent = rgb(64, 110, 235),
+    gold   = rgb(214, 150, 0),
+    good   = rgb(30, 170, 90),
+    warn   = rgb(214, 140, 0),
+    bad    = rgb(230, 70, 70),
+}
+
+-- transparency per surface (derived from Config.Glass)
+local A = {
+    win   = Config.Glass,
+    panel = math.min(Config.Glass + 0.18, 0.9),
+    card  = math.min(Config.Glass + 0.06, 0.9),
 }
 
 local FONT, FONT_M, FONT_B = Enum.Font.Gotham, Enum.Font.GothamMedium, Enum.Font.GothamBold
@@ -75,6 +86,17 @@ local function new(class, props, parent)
     local inst = Instance.new(class)
     if props then
         for k, v in pairs(props) do inst[k] = v end
+        -- surfaces get their glass transparency automatically (by colour)
+        if props.BackgroundTransparency == nil and props.BackgroundColor3 then
+            local bc = props.BackgroundColor3
+            if bc == C.bg then
+                inst.BackgroundTransparency = A.win
+            elseif bc == C.panel then
+                inst.BackgroundTransparency = A.panel
+            elseif bc == C.card or bc == C.cardHi then
+                inst.BackgroundTransparency = A.card
+            end
+        end
     end
     if parent then inst.Parent = parent end
     return inst
@@ -102,6 +124,11 @@ end
 
 local function tween(inst, t, props)
     TweenService:Create(inst, TweenInfo.new(t, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
+end
+
+-- springy tween: overshoots a little, then settles
+local function bounce(inst, t, props)
+    TweenService:Create(inst, TweenInfo.new(t, Enum.EasingStyle.Back, Enum.EasingDirection.Out), props):Play()
 end
 
 -- ========================= GLOBAL STATE =========================
@@ -182,13 +209,13 @@ end
 
 -- ========================= RANKS =========================
 local RANKS = {
-    {min = 0,        name = "Starter",     color = rgb(160, 160, 160)},
-    {min = 100,      name = "Little Pro",  color = rgb(0, 230, 100)},
-    {min = 1000,     name = "Pro",         color = rgb(255, 230, 0)},
-    {min = 5000,     name = "Very Pro",    color = rgb(255, 50, 50)},
-    {min = 20000,    name = "Serious Pro", color = rgb(170, 50, 255)},
-    {min = 100000,   name = "OG",          color = rgb(255, 120, 0), stroke = rgb(0, 0, 0)},
-    {min = 1000000,  name = "Hacker",      color = rgb(0, 255, 100), stroke = rgb(255, 255, 255)},
+    {min = 0,        name = "Starter",     color = rgb(130, 135, 150)},
+    {min = 100,      name = "Little Pro",  color = rgb(20, 180, 90)},
+    {min = 1000,     name = "Pro",         color = rgb(214, 160, 0)},
+    {min = 5000,     name = "Very Pro",    color = rgb(230, 50, 50)},
+    {min = 20000,    name = "Serious Pro", color = rgb(150, 50, 230)},
+    {min = 100000,   name = "OG",          color = rgb(240, 110, 0)},
+    {min = 1000000,  name = "Hacker",      color = rgb(0, 185, 90)},
     {min = 10000000, name = "GOD",         color = rgb(255, 255, 255), rainbow = true},
 }
 
@@ -229,7 +256,7 @@ end
 task.spawn(function()
     local rng = Random.new()
     while ScreenGui.Parent do
-        local color = Color3.fromHSV((os.clock() % 1.5) / 1.5, 0.85, 1)
+        local color = Color3.fromHSV((os.clock() % 1.5) / 1.5, 0.9, 0.85)
         for el, mode in pairs(rainbowElements) do
             if el.Parent then
                 if mode == "Text" then
@@ -349,20 +376,20 @@ local function applyValueStyle(row, valueLabel, images, num)
         if Config.ShakeFx then shakingFrames[row] = true end
         for _, img in ipairs(images) do rainbowElements[img] = "Image" end
     elseif num < 10 then
-        valueLabel.TextColor3 = rgb(0, 255, 100)
+        valueLabel.TextColor3 = rgb(0, 170, 80)
     elseif num < 100 then
-        valueLabel.TextColor3 = rgb(255, 220, 0)
+        valueLabel.TextColor3 = rgb(205, 150, 0)
     elseif num < 1000 then
-        valueLabel.TextColor3 = rgb(255, 50, 50)
+        valueLabel.TextColor3 = rgb(225, 45, 45)
     elseif num < 10000 then
-        valueLabel.TextColor3 = rgb(180, 50, 255)
+        valueLabel.TextColor3 = rgb(150, 45, 230)
     elseif num < 100000 then
-        valueLabel.TextColor3 = rgb(255, 120, 0)
+        valueLabel.TextColor3 = rgb(240, 110, 0)
         valueLabel.TextStrokeColor3 = rgb(0, 0, 0)
-        valueLabel.TextStrokeTransparency = 0
+        valueLabel.TextStrokeTransparency = 0.55
     elseif num < 1000000 then
-        valueLabel.TextColor3 = rgb(0, 0, 0)
-        valueLabel.TextStrokeColor3 = rgb(255, 255, 255)
+        valueLabel.TextColor3 = rgb(255, 255, 255)
+        valueLabel.TextStrokeColor3 = rgb(0, 0, 0)
         valueLabel.TextStrokeTransparency = 0
     else
         rainbowElements[valueLabel] = "Text"
@@ -448,26 +475,31 @@ end
 
 -- ========================= UI: WINDOW =========================
 local WIN_W, WIN_H, TITLE_H = 640, 440, 40
+local MARGIN = 10
 local camera = workspace.CurrentCamera
 local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
-local uiScale = math.clamp(math.min(viewport.X / (WIN_W + 60), viewport.Y / (WIN_H + 50)), 0.5, 1)
+local uiScale = math.clamp(math.min(viewport.X / (WIN_W + 60), viewport.Y / (WIN_H + 50), Config.Scale), 0.45, 1)
 
+-- anchored at the bottom-left corner
 local Window = new("Frame", {
     Name = "Window",
+    AnchorPoint = Vector2.new(0, 1),
     Size = UDim2.new(0, WIN_W, 0, WIN_H),
-    Position = UDim2.new(
-        math.max(0, (viewport.X - WIN_W * uiScale) / 2 / viewport.X), 0,
-        math.max(0, (viewport.Y - WIN_H * uiScale) / 2 / viewport.Y), 0),
+    Position = UDim2.new(MARGIN / viewport.X, 0, 1 - MARGIN / viewport.Y, 0),
     BackgroundColor3 = C.bg, BorderSizePixel = 0, ClipsDescendants = true, Active = true,
 }, ScreenGui)
 corner(Window, 12)
 outline(Window, C.line, 1)
-new("UIScale", {Scale = uiScale}, Window)
+local WindowScale = new("UIScale", {Scale = uiScale * 0.85}, Window)
 
 local TitleBar = new("Frame", {
     Name = "TitleBar", Size = UDim2.new(1, 0, 0, TITLE_H),
-    BackgroundColor3 = C.panel, BorderSizePixel = 0,
+    BackgroundTransparency = 1, BorderSizePixel = 0,
 }, Window)
+new("Frame", {
+    AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 0, 1, 0), Size = UDim2.new(1, 0, 0, 1),
+    BackgroundColor3 = C.line, BackgroundTransparency = 0.4, BorderSizePixel = 0,
+}, TitleBar)
 
 local Logo = new("Frame", {
     Size = UDim2.new(0, 10, 0, 10), Position = UDim2.new(0, 14, 0.5, -5),
@@ -479,6 +511,38 @@ label({Text = "Inventory Tracker", Font = FONT_B, TextSize = 15,
 label({Text = "v2  |  blocks / gold / slots", TextSize = 11, TextColor3 = C.sub,
     Position = UDim2.new(0, 186, 0, 0), Size = UDim2.new(0, 200, 1, 0)}, TitleBar)
 
+-- soft circle that expands from the centre of a button / row and fades out
+local function ripple(btn)
+    btn.ClipsDescendants = true
+    local w, h = btn.AbsoluteSize.X, btn.AbsoluteSize.Y
+    local d = math.max(w, h) / math.max(WindowScale.Scale, 0.1) * 1.25
+    local c = new("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 0),
+        Size = UDim2.new(0, 0, 0, 0), BackgroundColor3 = C.accent, BackgroundTransparency = 0.6,
+        BorderSizePixel = 0, ZIndex = btn.ZIndex + 1,
+    }, btn)
+    corner(c, "full")
+    local t = TweenService:Create(c, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        {Size = UDim2.new(0, d, 0, d), BackgroundTransparency = 1})
+    t.Completed:Connect(function() c:Destroy() end)
+    t:Play()
+end
+
+-- press = shrink + ripple, release = springy bounce back
+local function pressFx(btn)
+    btn.ClipsDescendants = true
+    local sc = new("UIScale", {Scale = 1}, btn)
+    track(btn.MouseButton1Down:Connect(function()
+        tween(sc, 0.07, {Scale = 0.88})
+        ripple(btn)
+    end))
+    local function release()
+        bounce(sc, 0.45, {Scale = 1})
+    end
+    track(btn.MouseButton1Up:Connect(release))
+    track(btn.MouseLeave:Connect(release))
+end
+
 local function titleButton(text, xOffset, hoverColor)
     local b = new("TextButton", {
         Text = text, Font = FONT_B, TextSize = 14, TextColor3 = C.text, AutoButtonColor = false,
@@ -486,8 +550,15 @@ local function titleButton(text, xOffset, hoverColor)
         AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, xOffset, 0.5, 0),
     }, TitleBar)
     corner(b, 7)
-    track(b.MouseEnter:Connect(function() b.BackgroundColor3 = hoverColor end))
-    track(b.MouseLeave:Connect(function() b.BackgroundColor3 = C.card end))
+    track(b.MouseEnter:Connect(function()
+        b.BackgroundColor3 = hoverColor
+        b.TextColor3 = (hoverColor == C.bad) and rgb(255, 255, 255) or C.text
+    end))
+    track(b.MouseLeave:Connect(function()
+        b.BackgroundColor3 = C.card
+        b.TextColor3 = C.text
+    end))
+    pressFx(b)
     return b
 end
 local MinBtn = titleButton("-", -44, C.cardHi)
@@ -498,20 +569,28 @@ local Body = new("Frame", {
     BackgroundTransparency = 1,
 }, Window)
 
--- dragging (scale based, works with UIScale + touch)
+-- dragging: the window follows through a spring (slight delay + overshoot)
 do
-    local dragging, dragStart, startPos = false, nil, nil
+    local sp = {
+        x = Window.Position.X.Scale, y = Window.Position.Y.Scale, vx = 0, vy = 0,
+        tx = Window.Position.X.Scale, ty = Window.Position.Y.Scale,
+    }
+    local K, D = 170, 16          -- stiffness / damping (lower D = more bounce)
+    local dragging, dragStart, startX, startY = false, nil, 0, 0
+
     track(TitleBar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1
             or input.UserInputType == Enum.UserInputType.Touch then
             dragging = true
             dragStart = input.Position
-            startPos = Window.Position
+            startX, startY = sp.tx, sp.ty
+            bounce(WindowScale, 0.25, {Scale = uiScale * 1.03})
             local changed
             changed = input.Changed:Connect(function()
                 if input.UserInputState == Enum.UserInputState.End then
                     dragging = false
                     changed:Disconnect()
+                    bounce(WindowScale, 0.5, {Scale = uiScale})
                 end
             end)
         end
@@ -521,10 +600,25 @@ do
             or input.UserInputType == Enum.UserInputType.Touch) then
             local size = ScreenGui.AbsoluteSize
             local d = input.Position - dragStart
-            Window.Position = UDim2.new(
-                math.clamp(startPos.X.Scale + d.X / size.X, -0.25, 0.92), 0,
-                math.clamp(startPos.Y.Scale + d.Y / size.Y, 0, 0.92), 0)
+            sp.tx = math.clamp(startX + d.X / size.X, -0.25, 0.92)
+            sp.ty = math.clamp(startY + d.Y / size.Y, 0.12, 1.02)
         end
+    end))
+    track(RunService.Heartbeat:Connect(function(dt)
+        dt = math.min(dt, 1 / 30)
+        local dx, dy = sp.tx - sp.x, sp.ty - sp.y
+        if math.abs(dx) + math.abs(dy) + math.abs(sp.vx) + math.abs(sp.vy) < 2e-4 then
+            if sp.x ~= sp.tx or sp.y ~= sp.ty then
+                sp.x, sp.y, sp.vx, sp.vy = sp.tx, sp.ty, 0, 0
+                Window.Position = UDim2.new(sp.x, 0, sp.y, 0)
+            end
+            return
+        end
+        sp.vx = sp.vx + (K * dx - D * sp.vx) * dt
+        sp.vy = sp.vy + (K * dy - D * sp.vy) * dt
+        sp.x = sp.x + sp.vx * dt
+        sp.y = sp.y + sp.vy * dt
+        Window.Position = UDim2.new(sp.x, 0, sp.y, 0)
     end))
 end
 
@@ -567,6 +661,7 @@ local HeaderAvatar = new("ImageLabel", {
 }, Header)
 corner(HeaderAvatar, "full")
 local HeaderAvatarStroke = outline(HeaderAvatar, C.line, 2)
+local HeaderAvatarScale = new("UIScale", {Scale = 1}, HeaderAvatar)
 
 local HeaderName = label({Text = "Select a player", Font = FONT_B, TextSize = 17,
     TextTruncate = Enum.TextTruncate.AtEnd,
@@ -652,6 +747,7 @@ local function makeTab(text, pos)
         Position = pos, Size = UDim2.new(0.5, -4, 1, -6),
     }, TabsFrame)
     corner(b, 6)
+    pressFx(b)
     return b
 end
 local ItemsTab = makeTab("Items", UDim2.new(0, 3, 0, 3))
@@ -672,6 +768,7 @@ local SortBtn = new("TextButton", {
     Position = UDim2.new(1, 0, 0, 148), Size = UDim2.new(0, 84, 0, 28),
 }, Content)
 corner(SortBtn, 8)
+pressFx(SortBtn)
 
 -- list
 local ListHolder = new("Frame", {
@@ -954,11 +1051,19 @@ local function addItemRow(item)
     rowByItem[item] = rec
     table.insert(rowList, rec)
 
+    local first = true
     local function update()
+        local old = rec.num
         local num = toNumber(item.Value) or 0
         rec.num = num
         valueLabel.Text = commas(num)
         applyValueStyle(row, valueLabel, rec.images, num)
+        if not first and num ~= old and num < 10000000 then
+            -- quick green (up) / red (down) flash that fades back
+            row.BackgroundColor3 = (num > old) and rgb(200, 245, 215) or rgb(255, 214, 214)
+            tween(row, 0.7, {BackgroundColor3 = C.card})
+        end
+        first = false
         if gold then
             container.LayoutOrder = -2147483000
         else
@@ -1074,8 +1179,9 @@ end
 -- ========================= TABS / SORT =========================
 local function refreshTabVisuals()
     local function paint(btn, active)
-        btn.BackgroundColor3 = active and C.accent or C.panel
-        btn.TextColor3 = active and C.text or C.sub
+        btn.BackgroundColor3 = C.accent
+        btn.BackgroundTransparency = active and 0 or 1
+        btn.TextColor3 = active and rgb(255, 255, 255) or C.sub
     end
     paint(ItemsTab, currentTab == "Items")
     paint(SlotsTab, currentTab == "Slots")
@@ -1141,6 +1247,8 @@ local function selectPlayer(player)
 
     HeaderName.Text = player.DisplayName .. ((player == Players.LocalPlayer) and "  (you)" or "")
     HeaderSub.Text = "@" .. player.Name .. "   |   ID " .. tostring(player.UserId)
+    HeaderAvatarScale.Scale = 0.7
+    bounce(HeaderAvatarScale, 0.5, {Scale = 1})
     loadAvatar(HeaderAvatar, player.UserId, "bust")
 
     for p in pairs(playerRows) do refreshRowColor(p, false) end
@@ -1196,6 +1304,14 @@ local function addPlayerRow(player)
     table.insert(tr.listeners, function(s) updatePlayerRow(pr, s) end)
     updatePlayerRow(pr, tr.stats)
 
+    local avScale = new("UIScale", {Scale = 1}, avatar)
+    track(btn.MouseButton1Down:Connect(function()
+        ripple(container)
+        tween(avScale, 0.07, {Scale = 0.8})
+    end))
+    local function avRelease() bounce(avScale, 0.5, {Scale = 1}) end
+    track(btn.MouseButton1Up:Connect(avRelease))
+    track(btn.MouseLeave:Connect(avRelease))
     track(btn.MouseButton1Click:Connect(function() selectPlayer(player) end))
     track(btn.MouseEnter:Connect(function() refreshRowColor(player, true) end))
     track(btn.MouseLeave:Connect(function() refreshRowColor(player, false) end))
@@ -1229,10 +1345,10 @@ track(MinBtn.MouseButton1Click:Connect(function()
     MinBtn.Text = minimized and "+" or "-"
     if minimized then
         Body.Visible = false
-        tween(Window, 0.18, {Size = UDim2.new(0, WIN_W, 0, TITLE_H)})
+        tween(Window, 0.2, {Size = UDim2.new(0, WIN_W, 0, TITLE_H)})
     else
         Body.Visible = true
-        tween(Window, 0.18, {Size = UDim2.new(0, WIN_W, 0, WIN_H)})
+        bounce(Window, 0.45, {Size = UDim2.new(0, WIN_W, 0, WIN_H)})
     end
 end))
 
@@ -1264,6 +1380,9 @@ refreshHeader()
 if Config.AutoSelectSelf and Players.LocalPlayer and playerRows[Players.LocalPlayer] then
     selectPlayer(Players.LocalPlayer)
 end
+
+-- pop-in
+bounce(WindowScale, 0.55, {Scale = uiScale})
 
 pcall(function()
     getgenv().__InvTrackerCleanup = cleanup
