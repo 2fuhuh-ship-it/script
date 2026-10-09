@@ -2979,6 +2979,8 @@ local Config = {
     ShakeFx = true,
     ToggleKey = Enum.KeyCode.RightShift,
     AutoBuildDelay = 8,   -- seconds to wait after joining before "Auto Build on Join" starts
+    ChatDbUrl = "https://build-a-boat-chat-default-rtdb.firebaseio.com",       -- World Chat database URL (Firebase Realtime Database). Leave "" to set it inside the chat tab
+    ChatPoll = 2.5,       -- seconds between chat refreshes
     Glass = 0.12,   -- window transparency (0 = solid, 1 = invisible); panels/cards follow it
     Scale = 0.85,   -- max UI size (1 = full size); it also auto-shrinks on small screens
 
@@ -3503,8 +3505,8 @@ local Logo = new("Frame", {
 corner(Logo, "full")
 label({Text = "Auto Build", Font = FONT_B, TextSize = 16,
     Position = UDim2.new(0, 32, 0, 0), Size = UDim2.new(0, 110, 1, 0)}, TitleBar)
-label({Text = "v3  |  build  /  copy  /  inventory", TextSize = 11, TextColor3 = C.sub,
-    Position = UDim2.new(0, 142, 0, 0), Size = UDim2.new(0, 240, 1, 0)}, TitleBar)
+label({Text = "v3  |  build  /  copy  /  chat  /  inventory", TextSize = 11, TextColor3 = C.sub,
+    Position = UDim2.new(0, 142, 0, 0), Size = UDim2.new(0, 260, 1, 0)}, TitleBar)
 
 -- soft circle that expands from the centre of a button / row and fades out
 local function ripple(btn)
@@ -4383,6 +4385,59 @@ do
             TextSize = 10, TextColor3 = C.sub, TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top,
             Position = UDim2.new(0, 12, 0, 234), Size = UDim2.new(1, -24, 0, 40)}, right)
 
+        -- ===== spectate: see the selected player's camera view
+        local viewDiv = new("Frame", {Position = UDim2.new(0, 10, 0, 284), Size = UDim2.new(1, -20, 0, 1),
+            BackgroundColor3 = C.line, BackgroundTransparency = 0.4, BorderSizePixel = 0}, right)
+        label({Text = "Look at their build first", Font = FONT_B, TextSize = 12,
+            Position = UDim2.new(0, 12, 0, 294), Size = UDim2.new(1, -24, 0, 16)}, right)
+        local viewBtn = kit.button(right, "View Player's Camera", "ghost", UDim2.new(0, 10, 0, 316), UDim2.new(1, -20, 0, 36))
+        label({Text = "Switches your camera to the selected player so you can see what they see. Press again to go back to yourself.",
+            TextSize = 10, TextColor3 = C.sub, TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top,
+            Position = UDim2.new(0, 12, 0, 358), Size = UDim2.new(1, -24, 0, 40)}, right)
+
+        local viewing = nil
+        local function ownHumanoid()
+            local ch = LP.Character
+            return ch and ch:FindFirstChildOfClass("Humanoid")
+        end
+        local function stopView()
+            viewing = nil
+            pcall(function()
+                local cam = workspace.CurrentCamera
+                local hum = ownHumanoid()
+                if cam and hum then cam.CameraSubject = hum end
+            end)
+            pcall(function() viewBtn.Text = "View Player's Camera" end)
+        end
+        Hub.stopView = stopView
+        local function startView(p)
+            local hum = p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+            if not hum then Hub.status(p.DisplayName .. " has no character right now", "bad") return end
+            viewing = p
+            workspace.CurrentCamera.CameraSubject = hum
+            viewBtn.Text = "Stop Viewing " .. p.DisplayName
+            Hub.status("Viewing " .. p.DisplayName .. "'s camera", "good")
+        end
+        track(viewBtn.MouseButton1Click:Connect(function()
+            if viewing then
+                stopView()
+                Hub.status("Camera back to you", "good")
+                return
+            end
+            local p = AB.getSelectedPlayer()
+            if not p then Hub.status("Select a player first (step 1)", "bad") return end
+            if p == LP then Hub.status("That's you - pick someone else", "bad") return end
+            startView(p)
+        end))
+        -- follow the player through respawns; stop if they leave
+        track(RunService.Heartbeat:Connect(function()
+            if not viewing then return end
+            if not viewing.Parent then stopView() return end
+            local hum = viewing.Character and viewing.Character:FindFirstChildOfClass("Humanoid")
+            local cam = workspace.CurrentCamera
+            if hum and cam and cam.CameraSubject ~= hum then cam.CameraSubject = hum end
+        end))
+
         local rows = {}
         local function selectPl(p)
             AB.setSelectedPlayer(p)
@@ -4459,14 +4514,480 @@ do
         refreshPlayers()
     end
 
+    ---------------------------------------------------------------- PAGE 3: WORLD CHAT + PRIVATE MESSAGES
+    local CHAT_CFG_FILE = "AutoBuildHub_chat.json"
+
+    local function buildChatPage(page)
+        local me = LP
+        local dbUrl = tostring(Config.ChatDbUrl or "")
+
+        local function cleanUrl(u)
+            u = tostring(u or ""):match("^%s*(.-)%s*$")
+            u = u:gsub("%.json$", ""):gsub("/+$", "")
+            return u
+        end
+        dbUrl = cleanUrl(dbUrl)
+        if dbUrl == "" then
+            pcall(function()
+                if type(isfile) == "function" and isfile(CHAT_CFG_FILE) then
+                    local d = HttpService:JSONDecode(readfile(CHAT_CFG_FILE))
+                    if type(d) == "table" and type(d.url) == "string" then dbUrl = cleanUrl(d.url) end
+                end
+            end)
+        end
+
+        local reqFn = (type(request) == "function" and request)
+            or (type(http_request) == "function" and http_request)
+            or (syn and syn.request)
+        local function http(method, url, body)
+            if not reqFn then return nil, "executor has no request function" end
+            local ok, r = pcall(reqFn, {Url = url, Method = method,
+                Headers = {["Content-Type"] = "application/json"}, Body = body})
+            if not ok or type(r) ~= "table" then return nil, "request failed" end
+            local code = tonumber(r.StatusCode) or 0
+            if code < 200 or code >= 300 then return nil, "HTTP " .. code end
+            return r.Body or ""
+        end
+
+        -- ---------- state
+        local threads, seen, lastKey = {}, {}, {}
+        local current = "world"
+        local initialLoad = true
+        local rowOrder = 0
+        local openDM, switchThread, refreshThreads
+
+        local function getThread(key, name, userId, user)
+            local t = threads[key]
+            if not t then
+                t = {key = key, name = name or key, user = user, userId = userId, msgs = {}, unread = 0, last = 0}
+                threads[key] = t
+            else
+                if name and key ~= "world" then t.name = name end
+                if user then t.user = user end
+            end
+            return t
+        end
+        getThread("world", "World Chat")
+
+        -- ---------- layout
+        local left = kit.card(page, UDim2.new(0, 8, 0, 8), UDim2.new(0, 220, 1, -16))
+        label({Text = "Chats", Font = FONT_B, TextSize = 14, Position = UDim2.new(0, 14, 0, 9),
+            Size = UDim2.new(1, -28, 0, 20)}, left)
+        local threadList = scrollList(left, UDim2.new(0, 8, 0, 36), UDim2.new(1, -16, 1, -44))
+
+        local right = kit.card(page, UDim2.new(0, 236, 0, 8), UDim2.new(1, -244, 1, -16))
+
+        -- setup panel (shown until a database URL is saved)
+        local setup = new("Frame", {BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Visible = false}, right)
+        kit.heading(setup, nil, "Set up World Chat", nil)
+        label({
+            Text = "Messages travel through a free Firebase Realtime Database that everyone using this script shares.\n\n"
+                .. "1. Open console.firebase.google.com and create a project.\n"
+                .. "2. Build > Realtime Database > Create database (start in test mode).\n"
+                .. "3. Open the Rules tab, set  { \"rules\": { \".read\": true, \".write\": true } }  and Publish.\n"
+                .. "4. Copy the database URL (looks like https://xxxx-default-rtdb.firebaseio.com) and paste it below.\n\n"
+                .. "Everybody must use the same URL. When you share the script, put it in Config.ChatDbUrl.",
+            TextSize = 11, TextColor3 = C.sub, TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top,
+            Position = UDim2.new(0, 14, 0, 34), Size = UDim2.new(1, -28, 0, 200),
+        }, setup)
+        local urlBox = kit.input(setup, "https://your-project-default-rtdb.firebaseio.com", dbUrl,
+            UDim2.new(0, 10, 0, 244), UDim2.new(1, -20, 0, 32))
+        local saveUrlBtn = kit.button(setup, "Save & Connect", "primary", UDim2.new(0, 10, 0, 286), UDim2.new(1, -20, 0, 36))
+        local setupMsg = label({Text = "", TextSize = 11, TextColor3 = C.sub, TextWrapped = true,
+            TextYAlignment = Enum.TextYAlignment.Top,
+            Position = UDim2.new(0, 12, 0, 330), Size = UDim2.new(1, -24, 0, 44)}, setup)
+
+        -- chat panel
+        local chatUI = new("Frame", {BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Visible = false}, right)
+
+        local hBadge = new("TextLabel", {Text = "W", Font = FONT_B, TextSize = 16, TextColor3 = rgb(255, 255, 255),
+            BackgroundColor3 = C.accent, BorderSizePixel = 0,
+            Position = UDim2.new(0, 10, 0, 8), Size = UDim2.new(0, 36, 0, 36)}, chatUI)
+        corner(hBadge, "full")
+        local hImg = new("ImageLabel", {BackgroundColor3 = C.cardHi, BorderSizePixel = 0, Image = "",
+            Position = UDim2.new(0, 10, 0, 8), Size = UDim2.new(0, 36, 0, 36), Visible = false}, chatUI)
+        corner(hImg, "full")
+        local hTitle = label({Text = "World Chat", Font = FONT_B, TextSize = 14, TextTruncate = Enum.TextTruncate.AtEnd,
+            Position = UDim2.new(0, 56, 0, 8), Size = UDim2.new(1, -190, 0, 18)}, chatUI)
+        local hSub = label({Text = "", TextSize = 10, TextColor3 = C.sub, TextTruncate = Enum.TextTruncate.AtEnd,
+            Position = UDim2.new(0, 56, 0, 27), Size = UDim2.new(1, -190, 0, 14)}, chatUI)
+        local connLbl = label({Text = "connecting...", Font = FONT_B, TextSize = 10, TextColor3 = C.sub,
+            TextXAlignment = Enum.TextXAlignment.Right,
+            Position = UDim2.new(1, -176, 0, 8), Size = UDim2.new(0, 100, 0, 18)}, chatUI)
+        local setupBtn = kit.button(chatUI, "Setup", "ghost", UDim2.new(1, -68, 0, 10), UDim2.new(0, 58, 0, 28))
+        -- the database URL is built into the script (Config.ChatDbUrl), so everyone shares the same chat
+        local BUILTIN = tostring(Config.ChatDbUrl or "") ~= ""
+        if BUILTIN then
+            setupBtn.Visible = false
+            connLbl.Position = UDim2.new(1, -116, 0, 8)
+        end
+        new("Frame", {Position = UDim2.new(0, 0, 0, 52), Size = UDim2.new(1, 0, 0, 1),
+            BackgroundColor3 = C.line, BackgroundTransparency = 0.4, BorderSizePixel = 0}, chatUI)
+
+        local msgScroll = scrollList(chatUI, UDim2.new(0, 8, 0, 58), UDim2.new(1, -16, 1, -106))
+        local inputBox = kit.input(chatUI, "Type a message (中文 / English)...", "",
+            UDim2.new(0, 10, 1, -42), UDim2.new(1, -90, 0, 32))
+        local sendBtn = kit.button(chatUI, "Send", "primary", UDim2.new(1, -72, 1, -42), UDim2.new(0, 62, 0, 32))
+
+        -- ---------- helpers
+        local function setConn(ok, err)
+            if ok then
+                connLbl.Text = "online"
+                connLbl.TextColor3 = C.good
+            else
+                connLbl.Text = "offline" .. (err and (" (" .. tostring(err) .. ")") or "")
+                connLbl.TextColor3 = C.bad
+            end
+        end
+
+        local function updateBadge()
+            local n = 0
+            for _, t in pairs(threads) do n = n + t.unread end
+            Hub.tabs.chat.Text = (n > 0) and ("World Chat  (" .. n .. ")") or "World Chat"
+        end
+
+        local function viewing(key)
+            return key == current and page.Visible and Window.Visible
+        end
+
+        -- "HH:mm" (or "MM/dd HH:mm" for messages older than a day), in the viewer's local time
+        local function fmtTime(ms)
+            ms = tonumber(ms) or (os.time() * 1000)
+            local ok, s = pcall(function()
+                local dt = DateTime.fromUnixTimestampMillis(ms)
+                local old = (os.time() * 1000 - ms) > 86400000
+                return dt:FormatLocalTime(old and "MM/dd HH:mm" or "HH:mm", "zh-tw")
+            end)
+            return ok and s or ""
+        end
+
+        local function appendRow(m)
+            local nearBottom = msgScroll.CanvasPosition.Y + msgScroll.AbsoluteWindowSize.Y
+                >= msgScroll.AbsoluteCanvasSize.Y - 40
+            rowOrder = rowOrder + 1
+            local row = new("Frame", {
+                BackgroundColor3 = m.mine and C.cardHi or C.card, BorderSizePixel = 0,
+                Size = UDim2.new(1, -4, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = rowOrder,
+            }, msgScroll)
+            corner(row, 8)
+            new("UIPadding", {PaddingBottom = UDim.new(0, 6)}, row)
+            local av = new("ImageLabel", {BackgroundColor3 = C.cardHi, BorderSizePixel = 0, Image = "",
+                Position = UDim2.new(0, 6, 0, 6), Size = UDim2.new(0, 32, 0, 32)}, row)
+            corner(av, "full")
+            loadAvatar(av, m.uid, "head")
+            local avBtn = new("TextButton", {Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0),
+                ZIndex = 3}, av)
+            local st = outline(av, C.accent, 2)
+            st.Transparency = 1
+            avBtn.MouseEnter:Connect(function() tween(st, 0.12, {Transparency = 0}) end)
+            avBtn.MouseLeave:Connect(function() tween(st, 0.12, {Transparency = 1}) end)
+            avBtn.MouseButton1Click:Connect(function() openDM(m.uid, m.display, m.name) end)
+            label({Text = m.display .. "   @" .. m.name .. "   ID " .. tostring(m.uid), Font = FONT_B, TextSize = 11,
+                TextColor3 = m.mine and C.accent or C.sub, TextTruncate = Enum.TextTruncate.AtEnd,
+                Position = UDim2.new(0, 46, 0, 4), Size = UDim2.new(1, -112, 0, 14)}, row)
+            label({Text = fmtTime(m.ts), Font = FONT_M, TextSize = 10, TextColor3 = C.sub,
+                TextXAlignment = Enum.TextXAlignment.Right,
+                Position = UDim2.new(1, -108, 0, 4), Size = UDim2.new(0, 100, 0, 14)}, row)
+            label({Text = m.text, Font = FONT_M, TextSize = 13, TextWrapped = true,
+                TextYAlignment = Enum.TextYAlignment.Top, AutomaticSize = Enum.AutomaticSize.Y,
+                Position = UDim2.new(0, 46, 0, 19), Size = UDim2.new(1, -54, 0, 0)}, row)
+            if nearBottom or m.mine then
+                task.defer(function()
+                    task.wait()
+                    msgScroll.CanvasPosition = Vector2.new(0, math.max(0,
+                        msgScroll.AbsoluteCanvasSize.Y - msgScroll.AbsoluteWindowSize.Y))
+                end)
+            end
+        end
+
+        local function addMessage(key, m, silent)
+            local t = threads[key]
+            if not t then return end
+            table.insert(t.msgs, m)
+            if #t.msgs > 150 then table.remove(t.msgs, 1) end
+            t.last = os.clock()
+            if key == current then appendRow(m) end
+            if not m.mine and not viewing(key) then
+                t.unread = t.unread + 1
+                if key ~= "world" and not silent then
+                    Hub.status("New message from " .. m.display, "info")
+                    pcall(function()
+                        StarterGui:SetCore("SendNotification", {Title = "Private message from " .. m.display,
+                            Text = m.text:sub(1, 80), Duration = 6})
+                    end)
+                end
+            end
+            refreshThreads()
+            updateBadge()
+        end
+
+        -- ---------- thread list
+        refreshThreads = function()
+            for _, ch in ipairs(threadList:GetChildren()) do
+                if ch:IsA("GuiObject") then ch:Destroy() end
+            end
+            local keys = {}
+            for k in pairs(threads) do if k ~= "world" then keys[#keys + 1] = k end end
+            table.sort(keys, function(a, b) return threads[a].last > threads[b].last end)
+            table.insert(keys, 1, "world")
+            for i, k in ipairs(keys) do
+                local t = threads[k]
+                local on = (k == current)
+                local btn = new("TextButton", {Text = "", AutoButtonColor = false,
+                    BackgroundColor3 = on and C.cardHi or C.card, BorderSizePixel = 0,
+                    Size = UDim2.new(1, -4, 0, 46), LayoutOrder = i}, threadList)
+                corner(btn, 8)
+                if k == "world" then
+                    local g = new("TextLabel", {Text = "W", Font = FONT_B, TextSize = 14, TextColor3 = rgb(255, 255, 255),
+                        BackgroundColor3 = C.accent, BorderSizePixel = 0,
+                        Position = UDim2.new(0, 8, 0, 8), Size = UDim2.new(0, 30, 0, 30)}, btn)
+                    corner(g, "full")
+                else
+                    local img = new("ImageLabel", {BackgroundColor3 = C.cardHi, BorderSizePixel = 0, Image = "",
+                        Position = UDim2.new(0, 8, 0, 8), Size = UDim2.new(0, 30, 0, 30)}, btn)
+                    corner(img, "full")
+                    loadAvatar(img, t.userId, "head")
+                end
+                label({Text = (k == "world") and "World Chat" or t.name, Font = FONT_B, TextSize = 12,
+                    TextTruncate = Enum.TextTruncate.AtEnd,
+                    Position = UDim2.new(0, 46, 0, 6), Size = UDim2.new(1, -78, 0, 16)}, btn)
+                local lastMsg = t.msgs[#t.msgs]
+                label({Text = lastMsg and lastMsg.text or ((k == "world") and "Everyone" or "Private chat"),
+                    TextSize = 10, TextColor3 = C.sub, TextTruncate = Enum.TextTruncate.AtEnd,
+                    Position = UDim2.new(0, 46, 0, 24), Size = UDim2.new(1, -78, 0, 14)}, btn)
+                if t.unread > 0 then
+                    local pill = new("TextLabel", {Text = tostring(math.min(t.unread, 99)), Font = FONT_B, TextSize = 10,
+                        TextColor3 = rgb(255, 255, 255), BackgroundColor3 = C.bad, BorderSizePixel = 0,
+                        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
+                        Size = UDim2.new(0, 22, 0, 18)}, btn)
+                    corner(pill, "full")
+                end
+                btn.MouseEnter:Connect(function() if k ~= current then tween(btn, 0.1, {BackgroundColor3 = C.hover}) end end)
+                btn.MouseLeave:Connect(function() if k ~= current then tween(btn, 0.1, {BackgroundColor3 = C.card}) end end)
+                btn.MouseButton1Click:Connect(function() switchThread(k) end)
+            end
+        end
+
+        switchThread = function(key)
+            local t = threads[key]
+            if not t then return end
+            current = key
+            t.unread = 0
+            for _, ch in ipairs(msgScroll:GetChildren()) do
+                if ch:IsA("GuiObject") then ch:Destroy() end
+            end
+            rowOrder = 0
+            if key == "world" then
+                hBadge.Visible, hImg.Visible = true, false
+                hTitle.Text = "World Chat"
+                hSub.Text = "Max 100 characters  -  click an avatar to send a private message (unlimited)"
+            else
+                hBadge.Visible, hImg.Visible = false, true
+                loadAvatar(hImg, t.userId, "head")
+                hTitle.Text = t.name
+                hSub.Text = "Private message" .. (t.user and ("  -  @" .. t.user) or "")
+            end
+            for _, m in ipairs(t.msgs) do appendRow(m) end
+            task.defer(function()
+                task.wait()
+                msgScroll.CanvasPosition = Vector2.new(0, math.max(0,
+                    msgScroll.AbsoluteCanvasSize.Y - msgScroll.AbsoluteWindowSize.Y))
+            end)
+            refreshThreads()
+            updateBadge()
+        end
+
+        openDM = function(uid, display, user)
+            uid = tonumber(uid)
+            if not uid then return end
+            if uid == me.UserId then
+                Hub.status("That's you - pick someone else for a private message", "bad")
+                return
+            end
+            getThread(tostring(uid), display or user, uid, user)
+            if Hub.current ~= "chat" then Hub.veil() Hub.show("chat") end
+            switchThread(tostring(uid))
+            pcall(function() inputBox:CaptureFocus() end)
+        end
+
+        -- ---------- network
+        local WORLD_LIMIT = 100      -- max characters per world message (private messages are unlimited)
+        local DM_SAFETY = 20000      -- only a sanity cap so a broken client can't freeze the UI
+
+        local function cutChars(text, n)
+            local len = utf8.len(text)
+            if not len then return text:sub(1, n) end
+            if len <= n then return text end
+            local cut = utf8.offset(text, n + 1)
+            return cut and text:sub(1, cut - 1) or text
+        end
+
+        local function parseMsg(d, isDM)
+            if type(d) ~= "table" then return nil end
+            local uid = tonumber(d.id)
+            local text = d.t
+            if not uid or type(text) ~= "string" or text == "" then return nil end
+            local name = tostring(d.n or "?")
+            text = cutChars(text, isDM and DM_SAFETY or WORLD_LIMIT)
+            return {uid = uid, name = name, display = tostring(d.d or name), text = text,
+                ts = tonumber(d.ts), mine = (uid == me.UserId)}
+        end
+
+        local function fetchPath(path, onMsg)
+            if dbUrl == "" then return false, "no url" end
+            local url = dbUrl .. "/" .. path .. ".json?orderBy=%22%24key%22"
+            local lk = lastKey[path]
+            if lk then url = url .. "&startAt=%22" .. lk .. "%22" else url = url .. "&limitToLast=40" end
+            local body, err = http("GET", url)
+            if not body then return false, err end
+            local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+            if not ok then return false, "bad data" end
+            if type(data) == "table" then
+                local keys = {}
+                for k in pairs(data) do keys[#keys + 1] = tostring(k) end
+                table.sort(keys)
+                for _, k in ipairs(keys) do
+                    local id = path .. "/" .. k
+                    if not seen[id] and not (lk and k <= lk) then
+                        seen[id] = true
+                        local m = parseMsg(data[k], path ~= "world")
+                        if m then onMsg(m) end
+                    end
+                    if k > (lastKey[path] or "") then lastKey[path] = k end
+                end
+            end
+            return true
+        end
+
+        local function onWorld(m) addMessage("world", m, true) end
+        local function onDM(m)
+            local k = tostring(m.uid)
+            getThread(k, m.display, m.uid, m.name)
+            addMessage(k, m, initialLoad)
+        end
+
+        local function pollWorld() return fetchPath("world", onWorld) end
+
+        local function clip(text, limit)
+            text = tostring(text or ""):gsub("[\0-\8\11-\31]", " ")
+            text = text:match("^%s*(.-)%s*$")
+            if limit then text = cutChars(text, limit) end
+            return text
+        end
+
+        local lastSend = 0
+        local function doSend()
+            if dbUrl == "" then return end
+            local text = clip(inputBox.Text, (current == "world") and WORLD_LIMIT or nil)
+            if text == "" then return end
+            if os.clock() - lastSend < 1.2 then Hub.status("Slow down a little...", "bad") return end
+            lastSend = os.clock()
+            inputBox.Text = ""
+            local key = current
+            local t = threads[key]
+            task.spawn(function()
+                local payload = {id = me.UserId, n = me.Name, d = me.DisplayName, t = text,
+                    ts = {[".sv"] = "timestamp"}}   -- Firebase fills in the server time (ms)
+                local path = "world"
+                if key ~= "world" then
+                    path = "dm/" .. tostring(t.userId)
+                    payload.to = t.userId
+                end
+                local body, err = http("POST", dbUrl .. "/" .. path .. ".json", HttpService:JSONEncode(payload))
+                if not body then
+                    Hub.status("Send failed: " .. tostring(err), "bad")
+                    inputBox.Text = text
+                    return
+                end
+                if key == "world" then
+                    pollWorld()
+                else
+                    addMessage(key, {uid = me.UserId, name = me.Name, display = me.DisplayName, text = text,
+                        ts = os.time() * 1000, mine = true})
+                end
+            end)
+        end
+
+        track(sendBtn.MouseButton1Click:Connect(doSend))
+        track(inputBox.FocusLost:Connect(function(enter)
+            if enter then
+                doSend()
+                task.defer(function() pcall(function() inputBox:CaptureFocus() end) end)
+            end
+        end))
+
+        -- ---------- setup flow
+        local function showSetup(on)
+            setup.Visible = on
+            chatUI.Visible = not on
+        end
+        track(setupBtn.MouseButton1Click:Connect(function()
+            urlBox.Text = dbUrl
+            showSetup(true)
+        end))
+        track(saveUrlBtn.MouseButton1Click:Connect(function()
+            local u = cleanUrl(urlBox.Text)
+            if not u:match("^https://") then
+                setupMsg.Text = "The URL must start with https://"
+                setupMsg.TextColor3 = C.bad
+                return
+            end
+            setupMsg.Text = "Testing connection..."
+            setupMsg.TextColor3 = C.sub
+            task.spawn(function()
+                local body, err = http("GET", u .. "/.json?shallow=true")
+                if not body then
+                    setupMsg.Text = "Can't reach it (" .. tostring(err) .. "). Check the URL and that the rules allow read + write."
+                    setupMsg.TextColor3 = C.bad
+                    return
+                end
+                dbUrl = u
+                lastKey, seen, initialLoad = {}, {}, true
+                for _, t in pairs(threads) do t.msgs = {} end
+                pcall(function() writefile(CHAT_CFG_FILE, HttpService:JSONEncode({url = u})) end)
+                setupMsg.Text = ""
+                showSetup(false)
+                switchThread(current)
+                Hub.status("World Chat connected", "good")
+            end)
+        end))
+
+        -- mark as read when the tab is opened
+        track(page:GetPropertyChangedSignal("Visible"):Connect(function()
+            if page.Visible then
+                threads[current].unread = 0
+                refreshThreads()
+                updateBadge()
+            end
+        end))
+
+        -- poll loop
+        task.spawn(function()
+            while ScreenGui.Parent do
+                if dbUrl ~= "" then
+                    local ok1, e1 = pollWorld()
+                    local ok2, e2 = fetchPath("dm/" .. tostring(me.UserId), onDM)
+                    setConn(ok1 and ok2, e1 or e2)
+                    if ok1 and ok2 then initialLoad = false end
+                end
+                task.wait(tonumber(Config.ChatPoll) or 2.5)
+            end
+        end)
+
+        switchThread("world")
+        showSetup(dbUrl == "")
+    end
+
     ---------------------------------------------------------------- create the tabs
     local buildPage = Hub.addPage("build", "Auto Build", 112)
     local copyPage = Hub.addPage("copy", "Copy Build", 112)
+    local chatPage = Hub.addPage("chat", "World Chat", 132)
     Body = Hub.addPage("inventory", "Inventory", 124, "EXT")   -- the old Inventory Tracker lives in this tab
 
     AB.setSink(Hub.status)
     local setProgress, refreshFiles = buildBuildPage(buildPage)
     buildCopyPage(copyPage, refreshFiles)
+    buildChatPage(chatPage)
     Hub.setProgress = setProgress
     Hub.show("build")
 end
@@ -5562,6 +6083,7 @@ track(MinBtn.MouseButton1Click:Connect(function()
 end))
 
 local function cleanup()
+    if Hub.stopView then pcall(Hub.stopView) end   -- give the camera back
     findToken = findToken + 1   -- stops a running search loop (in memory only, the file is untouched)
     pcall(AB.clearPreview)
     AB.setSink(nil)
