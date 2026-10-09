@@ -4569,6 +4569,36 @@ do
         end
         getThread("world", "World Chat")
 
+        -- ---------- remember what you already read (survives re-executing the script)
+        local READ_FILE = "AutoBuildHub_chatread.json"
+        local readState = {}     -- [threadKey] = newest message key that was read
+        pcall(function()
+            if type(isfile) == "function" and isfile(READ_FILE) then
+                local d = HttpService:JSONDecode(readfile(READ_FILE))
+                if type(d) == "table" and d.db == dbUrl and type(d.read) == "table" then
+                    readState = d.read
+                end
+            end
+        end)
+        local function saveRead()
+            pcall(function()
+                writefile(READ_FILE, HttpService:JSONEncode({db = dbUrl, read = readState}))
+            end)
+        end
+        local function markRead(key)
+            local t = threads[key]
+            if not t then return end
+            local old = readState[key] or ""
+            local best = old
+            for _, m in ipairs(t.msgs) do
+                if m.key and m.key > best then best = m.key end
+            end
+            if best ~= old then
+                readState[key] = best
+                saveRead()
+            end
+        end
+
         -- ---------- layout
         local left = kit.card(page, UDim2.new(0, 8, 0, 8), UDim2.new(0, 220, 1, -16))
         label({Text = "Chats", Font = FONT_B, TextSize = 14, Position = UDim2.new(0, 14, 0, 9),
@@ -4710,7 +4740,11 @@ do
             if #t.msgs > 150 then table.remove(t.msgs, 1) end
             t.last = os.clock()
             if key == current then appendRow(m) end
-            if not m.mine and not viewing(key) then
+            local alreadyRead = (m.key ~= nil and readState[key] ~= nil and m.key <= readState[key])
+                or (key == "world" and initialLoad)   -- old world history on join is not "new"
+            if viewing(key) then
+                markRead(key)
+            elseif not m.mine and not alreadyRead then
                 t.unread = t.unread + 1
                 if key ~= "world" and not silent then
                     Hub.status("New message from " .. m.display, "info")
@@ -4776,6 +4810,7 @@ do
             if not t then return end
             current = key
             t.unread = 0
+            markRead(key)
             for _, ch in ipairs(msgScroll:GetChildren()) do
                 if ch:IsA("GuiObject") then ch:Destroy() end
             end
@@ -4856,7 +4891,7 @@ do
             if not goodTime(ts, nowMs) then ts = keyTime(key) end
             if not goodTime(ts, nowMs) then ts = nowMs end   -- fixed at receive time, never changes afterwards
             return {uid = uid, name = name, display = tostring(d.d or name), text = text,
-                ts = ts, mine = (uid == me.UserId)}
+                ts = ts, key = key, mine = (uid == me.UserId)}
         end
 
         local function fetchPath(path, onMsg)
@@ -4969,7 +5004,8 @@ do
                 end
                 dbUrl = u
                 lastKey, seen, initialLoad = {}, {}, true
-                for _, t in pairs(threads) do t.msgs = {} end
+                readState = {}
+                for _, t in pairs(threads) do t.msgs = {}; t.unread = 0 end
                 pcall(function() writefile(CHAT_CFG_FILE, HttpService:JSONEncode({url = u})) end)
                 setupMsg.Text = ""
                 showSetup(false)
@@ -4982,6 +5018,7 @@ do
         track(page:GetPropertyChangedSignal("Visible"):Connect(function()
             if page.Visible then
                 threads[current].unread = 0
+                markRead(current)
                 refreshThreads()
                 updateBadge()
             end
