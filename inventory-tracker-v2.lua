@@ -144,7 +144,7 @@ local function getPlayerZone(player)
 end
 
 local function cfStr(cf)
-    return string.format("%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f", cf:GetComponents())
+    return string.format("%.6f,%.6f,%.6f,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f", cf:GetComponents())
 end
 
 local function parseNums(s)
@@ -171,7 +171,7 @@ local function strV3(s)
     return Vector3.new(0,0,0)
 end
 
-local function v3Str(v) return string.format("%.4f,%.4f,%.4f", v.X, v.Y, v.Z) end
+local function v3Str(v) return string.format("%.5f,%.5f,%.5f", v.X, v.Y, v.Z) end
 
 local function strCF(s)
     if type(s) ~= "string" then return nil end
@@ -480,7 +480,7 @@ local function convertAsuToPRS(asuData)
     return prs
 end
 
-local function convertMcLaren(rawData)
+local function convertMcLaren(rawData, directBinds)
     local converted = {}
     local invertedBinds = {}
     local idToKey = {}
@@ -527,6 +527,10 @@ local function convertMcLaren(rawData)
                 if bi.SecCFrame then
                     entry.SecCFrame = bi.SecCFrame
                 end
+                -- files saved by Copy Build already store Binds on the controller: use them as-is
+                if directBinds and type(bi.Binds) == "table" then
+                    entry.BindTable = bi.Binds
+                end
 
                 local knownKeys = {ID=true, Transparency=true, Anchored=true, CanCollide=true,
                     CFrame=true, Size=true, Color=true, CastShadow=true, Binds=true, MValues=true, SecCFrame=true}
@@ -541,7 +545,7 @@ local function convertMcLaren(rawData)
                     idToKey[bi.ID] = {blockName = blockName, idx = idx}
                 end
 
-                if bi.Binds and type(bi.Binds) == "table" then
+                if (not directBinds) and bi.Binds and type(bi.Binds) == "table" then
                     for _, bindRow in ipairs(bi.Binds) do
                         if type(bindRow) == "table" and bindRow[1] then
                             local sourceID = bindRow[1]
@@ -641,7 +645,7 @@ local function loadBuildFromFile(fileName)
             if type(v) == "table" and #v > 0 and type(v[1]) == "table" then
                 local fb = v[1]
                 if fb.CFrame and (type(fb.CFrame) == "table" or type(fb.CFrame) == "string") then
-                    return convertMcLaren(inner), "BH"
+                    return convertMcLaren(inner, dec.AutoBuild_Version ~= nil), "BH"
                 end
             end
         end
@@ -1086,20 +1090,8 @@ local function activatePistonViaQueue(pistonBlock, buttonBlock)
     if not inputLocalScript then return false end
     local queueRF = inputLocalScript:FindFirstChild("QueueBlocksRequest")
     if not queueRF then return false end
-    local args = {
-        {
-            pistonBlock,
-            true,
-            false,
-            buttonBlock or false,
-            currentChar,
-            true,
-            false,
-            true,
-            true,
-            false
-        }
-    }
+    -- hand-pull arguments (confirmed working for restoring an opened piston)
+    local args = {{ pistonBlock, true, false, buttonBlock or false, currentChar, true, false, true, true, false }}
     return pcall(function()
         queueRF:FireServer(args)
     end)
@@ -1440,13 +1432,117 @@ local function pasteBuild(buildData, statusCb)
     end
 
     local function applyBindTables(styledList, p0, p1)
-        if not bindTool or not bindTool.Parent then
-            bindTool = Character:FindFirstChild("BindTool") or LocalPlayer.Backpack:FindFirstChild("BindTool")
-            if bindTool and bindTool.Parent ~= Character then bindTool.Parent = Character ; task.wait(0.05) end
-            bindRF = bindTool and bindTool:FindFirstChild("RF")
+        local BIND_DEBUG_REPORT = false  -- true = 連接後複製錯誤回報到剪貼簿
+        local bindLog = {}
+        local function blog(t) bindLog[#bindLog + 1] = t end
+        local function path(x)
+            if typeof(x) ~= "Instance" then return tostring(x) end
+            local ok, r = pcall(function() return x:GetFullName() end)
+            return ok and r or x.Name
         end
-        if not bindRF then updProg("No BindTool RF, skipping binds", p0) return end
+        local function descArg(a, depth)
+            depth = depth or 0
+            if typeof(a) == "Instance" then return "<" .. a.ClassName .. " " .. path(a) .. ">" end
+            if type(a) ~= "table" then return typeof(a) .. ":" .. tostring(a) end
+            if depth > 2 then return "{...}" end
+            local parts = {}
+            for k, v in pairs(a) do parts[#parts + 1] = tostring(k) .. "=" .. descArg(v, depth + 1) end
+            return "{" .. table.concat(parts, ", ") .. "}"
+        end
+        local function copyClip(t)
+            local f = setclipboard or toclipboard or set_clipboard or (Clipboard and Clipboard.set)
+            if f then return pcall(f, t) end
+            return false
+        end
+        local function finishReport(reason, done, missed)
+            if not BIND_DEBUG_REPORT then return end
+            local head = {
+                "=== BIND REPORT ===",
+                "result: " .. tostring(reason),
+                "done=" .. tostring(done) .. " missed=" .. tostring(missed),
+                "bindTool=" .. path(bindTool) .. "  RF=" .. path(bindRF),
+                "time=" .. os.date("%Y-%m-%d %H:%M:%S"),
+            }
+            pcall(function()
+                local names = {}
+                for _, c in ipairs(bindTool:GetChildren()) do names[#names + 1] = c.Name .. "(" .. c.ClassName .. ")" end
+                head[#head + 1] = "BindTool children: " .. table.concat(names, ", ")
+            end)
+            local all = {}
+            for _, l in ipairs(head) do all[#all + 1] = l end
+            for i, l in ipairs(bindLog) do
+                if i > 150 then all[#all + 1] = "... (" .. (#bindLog - 150) .. " more lines)" break end
+                all[#all + 1] = l
+            end
+            if reason ~= "ALL OK" and decompile then
+                pcall(function()
+                    local src = decompile(bindTool:FindFirstChild("BindLocalScript"))
+                    if type(src) == "string" and #src > 0 then
+                        all[#all + 1] = "---- BindLocalScript source (first 9000 chars) ----"
+                        all[#all + 1] = src:sub(1, 9000)
+                    end
+                end)
+            end
+            local text = table.concat(all, "\n")
+            pcall(function() writefile("bind_apply_log.txt", text) end)
+            local okC = copyClip(text)
+            pcall(function() updProg(okC and "Bind report copied to clipboard" or "Bind report saved: bind_apply_log.txt", 99) end)
+        end
+        local function rawInvoke(rf, args, timeout)
+            local done, ok, res = false, false, nil
+            task.spawn(function()
+                ok, res = pcall(function() return rf:InvokeServer(unpack(args)) end)
+                done = true
+            end)
+            local t0 = tick()
+            while not done and tick() - t0 < (timeout or 1.5) do
+                task.wait(0.05)
+                if stopBuild then break end
+            end
+            return done, ok, res
+        end
+        local function ensureBindTool()
+            local ch = LocalPlayer.Character or Character
+            local bt = ch and ch:FindFirstChild("BindTool") or LocalPlayer.Backpack:FindFirstChild("BindTool")
+            if not bt then return false end
+            if bt.Parent ~= ch then
+                local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+                local okE = false
+                if hum then okE = pcall(function() hum:EquipTool(bt) end) end
+                if not okE or bt.Parent ~= ch then pcall(function() bt.Parent = ch end) end
+                task.wait(0.15)
+            end
+            bindTool = bt
+            bindRF = bt:FindFirstChild("RF")
+            return bindRF ~= nil
+        end
+        if not ensureBindTool() then
+            blog("BindTool or RF not found. Backpack=" .. tostring(LocalPlayer.Backpack:FindFirstChild("BindTool") ~= nil)
+                .. " Character=" .. tostring((LocalPlayer.Character or Character):FindFirstChild("BindTool") ~= nil))
+            finishReport("NO BINDTOOL", 0, 0)
+            updProg("No BindTool RF, skipping binds", p0)
+            return
+        end
+        blog("styledList entries=" .. #styledList)
         local unbindRF = bindTool and bindTool:FindFirstChild("UnbindRF")
+        local function isBoundTo(tb, seat)
+            local cr = tb:FindFirstChild("ControllerRef")
+            if not cr then
+                local pp = tb:FindFirstChild("PPart")
+                cr = pp and pp:FindFirstChild("ControllerRef")
+            end
+            return cr ~= nil and cr.Value == seat
+        end
+        local function waitBound(tb, seat, t)
+            local t0 = tick()
+            repeat
+                if isBoundTo(tb, seat) then return true end
+                task.wait(0.05)
+            until tick() - t0 > (t or 0.8)
+            return isBoundTo(tb, seat)
+        end
+        local workingVariant = nil
+        local failedGroups = 0
         local hasAnyBinds = false
         for _, e in ipairs(styledList) do
             if e.v and type(e.v.BindTable) == "table" then
@@ -1456,7 +1552,27 @@ local function pasteBuild(buildData, statusCb)
                 if cnt > 0 then hasAnyBinds = true break end
             end
         end
-        if not hasAnyBinds then return end
+        do
+            local nWith = 0
+            for _, e in ipairs(styledList) do
+                local bt = e.v and e.v.BindTable
+                if type(bt) == "table" then
+                    local c = 0
+                    for _ in pairs(bt) do c = c + 1 end
+                    if c > 0 then nWith = nWith + 1 end
+                    blog(string.format("entry %s id=%s BindTable rows=%d", e.block and e.block.Name or "?", tostring(e.v.ID), c))
+                end
+            end
+            blog("entries with BindTable=" .. nWith)
+            local idl = {}
+            for k, b in pairs(placedById) do if type(k) == "number" then idl[#idl + 1] = k .. "=" .. b.Name end end
+            blog("placedById: " .. table.concat(idl, ", "))
+        end
+        if not hasAnyBinds then
+            blog("No entry has a BindTable: binds were lost between the save file and the build step")
+            finishReport("NO BINDTABLE IN LOADED DATA", 0, 0)
+            return
+        end
         do
             local unbound = {}
             for _, entry in ipairs(styledList) do
@@ -1466,12 +1582,15 @@ local function pasteBuild(buildData, statusCb)
                     local sb = entry.block
                     if sb and unbindRF and not unbound[sb] then
                         unbound[sb] = true
-                        invokeWithTimeout(unbindRF, {{sb}})
+                        local d1, ok1, r1 = rawInvoke(unbindRF, {{sb}}, 0.5)
+                        blog(string.format("UNBIND %s done=%s ok=%s ret=%s", sb.Name, tostring(d1), tostring(ok1), tostring(r1)))
                     end
                 end
             end
         end
-        local done = 0
+        ensureBindTool()
+        task.wait(0.2)
+        local done, missed = 0, 0
         for i, entry in ipairs(styledList) do
             if stopBuild then break end
             local bindTable = entry.v and entry.v.BindTable
@@ -1483,12 +1602,17 @@ local function pasteBuild(buildData, statusCb)
                 or seatBlock.Name:find("Delay") ~= nil
                 or seatBlock.Name:find("Sensor") ~= nil
             local actionMap = {}
+            local perTarget, order = {}, {}
             for _, bindRow in pairs(bindTable) do
                 if type(bindRow) ~= "table" then continue end
                 local targetBlock = placedById[bindRow[1]] or placedById[tostring(bindRow[1])]
                 local bindName = bindRow[2]
                 local bindValue = tonumber(bindRow[3]) or bindRow[3]
-                if not targetBlock or not bindName then continue end
+                if not targetBlock or not bindName then
+                    missed = missed + 1
+                    blog(string.format("SKIP row %s: target block id=%s not found (name=%s)", seatBlock.Name, tostring(bindRow[1]), tostring(bindName)))
+                    continue
+                end
                 local bindObject = targetBlock:FindFirstChild(bindName) or targetBlock:FindFirstChild(bindName, true)
                 if not bindObject then
                     pcall(function() bindObject = targetBlock:WaitForChild(bindName, 3) end)
@@ -1496,7 +1620,11 @@ local function pasteBuild(buildData, statusCb)
                         pcall(function() bindObject = targetBlock:FindFirstChild(bindName, true) end)
                     end
                 end
-                if not bindObject then continue end
+                if not bindObject then
+                    missed = missed + 1
+                    blog(string.format("SKIP row %s -> %s: bind object '%s' not found on target", seatBlock.Name, targetBlock.Name, tostring(bindName)))
+                    continue
+                end
 
                 local actionName
                 if bindName == "BindUp" then
@@ -1508,29 +1636,63 @@ local function pasteBuild(buildData, statusCb)
                 else
                     actionName = bindName:gsub("^Bind", "")
                 end
-                if not actionMap[actionName] then
-                    actionMap[actionName] = {objs = {}, keys = {}}
+                local g = perTarget[targetBlock]
+                if not g then
+                    g = {acts = {}, keys = {}}
+                    perTarget[targetBlock] = g
+                    order[#order + 1] = targetBlock
                 end
-                table.insert(actionMap[actionName].objs, bindObject)
-                table.insert(actionMap[actionName].keys, bindValue)
+                g.acts[actionName] = {bindObject}
+                g.keys[actionName] = bindValue
                 done = done + 1
             end
-            for actName, group in pairs(actionMap) do
-                local firstArg = {[actName] = group.objs}
-                local keyVal = #group.keys == 1 and group.keys[1] or group.keys
-
-                local thirdArg = isSwitchType and {} or {[actName] = keyVal}
-                if isSwitchType then
-                    task.spawn(function()
-                        pcall(function() bindRF:InvokeServer(firstArg, seatBlock, thirdArg, false) end)
-                    end)
-                else
-                    invokeWithTimeout(bindRF, {firstArg, seatBlock, thirdArg, false})
+            -- one call per target block (a piston sends Push + Pull together)
+            for _, tb in ipairs(order) do
+                if stopBuild then break end
+                local g = perTarget[tb]
+                if not (bindTool and bindTool.Parent == (LocalPlayer.Character or Character)) then ensureBindTool() end
+                local flat = {}
+                for an, lst in pairs(g.acts) do flat[an] = lst[1] end
+                local variants = {
+                    isSwitchType and {g.acts, {seatBlock}, {}, false, false} or {g.acts, {seatBlock}, g.keys, false, true},
+                    {g.acts, {seatBlock}, g.keys, false, false},
+                    {g.acts, {seatBlock}, {}, false, true},
+                    {g.acts, {seatBlock}, g.keys, false, true},
+                    {g.acts, seatBlock, {}, false, false},
+                    {g.acts, seatBlock, g.keys, false, true},
+                }
+                local okBound = false
+                local order2 = {}
+                if workingVariant then order2[1] = workingVariant end
+                for vi = 1, #variants do if vi ~= workingVariant then order2[#order2 + 1] = vi end end
+                for _, vi in ipairs(order2) do
+                    if stopBuild then break end
+                    local dn, okc, rres = rawInvoke(bindRF, variants[vi], 1.5)
+                    local bound = waitBound(tb, seatBlock, 0.8)
+                    blog(string.format("CALL v%d %s -> %s | finished=%s pcall_ok=%s ret=%s | bound=%s | args=%s",
+                        vi, seatBlock.Name, tb.Name, tostring(dn), tostring(okc), descArg(rres), tostring(bound), descArg(variants[vi])))
+                    if bound then
+                        okBound = true
+                        workingVariant = vi
+                        break
+                    end
+                    -- ControllerRef never shows up in the very first groups: stop guessing, keep the default shape
+                    if failedGroups >= 2 and not workingVariant then break end
                 end
+                if okBound then
+                    blog(string.format("OK   %s -> %s (variant %s)", seatBlock.Name, tb.Name, tostring(workingVariant)))
+                else
+                    failedGroups = failedGroups + 1
+                    missed = missed + 1
+                    blog(string.format("FAIL %s -> %s", seatBlock.Name, tb.Name))
+                end
+                task.wait(0.05)
             end
             if i % 5 == 0 then task.wait() end
         end
-        if done > 0 then updProg("Bound " .. done .. " controls", p1) end
+        blog("tool parent=" .. tostring(bindTool and bindTool.Parent and bindTool.Parent.Name))
+        finishReport((missed == 0 and done > 0) and "ALL OK" or "SOME/ALL FAILED", done, missed)
+        if done > 0 or missed > 0 then updProg("Bound " .. done .. " controls, missed " .. missed, p1) end
     end
 
     local function applyPropertiesPhase(styledList, p0, p1, skipTransp)
@@ -1796,7 +1958,7 @@ local function pasteBuild(buildData, statusCb)
                         if #pushParts > 0 then bindFirstArg.Push = pushParts end
                         if #pullParts > 0 then bindFirstArg.Pull = pullParts end
                         if next(bindFirstArg) then
-                            invokeWithTimeout(activationBindRF, {bindFirstArg, placedBtn, {}, false})
+                            invokeWithTimeout(activationBindRF, {bindFirstArg, {placedBtn}, {}, false, false})
                             task.wait(0.3)
                             for _, pd in ipairs(pistonsToActivate) do
                                 if stopBuild then break end
@@ -1849,33 +2011,7 @@ local function pasteBuild(buildData, statusCb)
             if entry.block and entry.block.Parent and entry.block.Name == "Piston" and entry.block:FindFirstChild("PPart") then
                 local ld = entry.v and entry.v.NumberValues and entry.v.NumberValues.LastDirection
                 if ld == 1 then
-                    local foundBtn = nil
-                    local bt = entry.v and entry.v.BindTable
-                    if type(bt) == "table" then
-                        for _, bindRow in pairs(bt) do
-                            if type(bindRow) == "table" then
-                                local targetBlock = placedById[bindRow[1]] or placedById[tostring(bindRow[1])]
-                                if targetBlock and (targetBlock.Name == "Button" or targetBlock.Name == "Switch" or targetBlock.Name == "Sensor" or targetBlock.Name == "Delay") then
-                                    foundBtn = targetBlock
-                                    break
-                                end
-                            end
-                        end
-                    end
-                    if not foundBtn then
-                        for _, otherEntry in ipairs(allStyled) do
-                            if otherEntry.block and otherEntry.block.Name == "Button" and otherEntry.v and type(otherEntry.v.BindTable) == "table" then
-                                local obBt = otherEntry.v.BindTable
-                                for _, bindRow in pairs(obBt) do
-                                    if type(bindRow) == "table" and (bindRow[1] == entry.v.ID or bindRow[1] == tostring(entry.v.ID)) then
-                                        foundBtn = otherEntry.block
-                                        break
-                                    end
-                                end
-                                if foundBtn then break end
-                            end
-                        end
-                    end
+                    local foundBtn = nil  -- restore the opened state by hand-pull; bindings are applied separately
                     local ok = activatePistonViaQueue(entry.block, foundBtn)
                     if not ok then
                         pcall(function()
@@ -2499,8 +2635,194 @@ local function saveBuildToFile(fileName, buildData)
     return false
 end
 
+local lastCopyStats = {pistons = 0, open = 0, binds = 0}
+
+-- ===== bind (connection) detection for Copy Build =====
+local function bindBlockOf(inst, playerBlocks)
+    local cur = inst
+    while cur and cur.Parent do
+        if cur.Parent == playerBlocks then return cur end
+        cur = cur.Parent
+    end
+    return nil
+end
+
+local function bindNum(v)
+    if type(v) == "number" then return v end
+    if typeof(v) == "EnumItem" then return v.Value end
+    return nil
+end
+
+local function bindReadKey(bo)
+    if (bo:IsA("IntValue") or bo:IsA("NumberValue")) and bindNum(bo.Value) and bo.Value ~= -1 then
+        return bo.Value
+    end
+    local kc = bo:FindFirstChild("DefaultInputKeyCode") or bo:FindFirstChild("KeyCode")
+    if kc and kc:IsA("ValueBase") then
+        local n = bindNum(kc.Value)
+        if n then return n end
+    end
+    local n2 = bindNum(bo:GetAttribute("DefaultInputKeyCode") or bo:GetAttribute("KeyCode"))
+    if n2 then return n2 end
+    if bo:IsA("IntValue") or bo:IsA("NumberValue") then
+        local n3 = bindNum(bo.Value)
+        if n3 then return n3 end
+    end
+    return -1
+end
+
+local function isControllerName(n)
+    return n:find("Seat") or n:find("Switch") or n:find("Sensor") or n:find("Button")
+        or n:find("Delay") or n:find("Controller") or n:find("Lever") or n:find("Gate")
+end
+
+local function describeInst(i)
+    local s = i.Name .. " [" .. i.ClassName .. "]"
+    if i:IsA("ValueBase") then
+        local v = i.Value
+        if typeof(v) == "Instance" then s = s .. " -> " .. v:GetFullName() else s = s .. " = " .. tostring(v) end
+    end
+    for k, v in pairs(i:GetAttributes()) do s = s .. " {" .. tostring(k) .. "=" .. tostring(v) .. "}" end
+    return s
+end
+
+-- Finds every (controller -> target.BindXxx -> key) link and stores it on the controller entry as BindTable.
+-- Row format (what applyBindTables expects): {targetId, bindName, key}
+local function collectBinds(playerBlocks, idToBlock, buildData)
+    local blockToId, idToEntry = {}, {}
+    for id, b in pairs(idToBlock) do blockToId[b] = id end
+    for _, list in pairs(buildData) do
+        for _, e in ipairs(list) do if e.ID then idToEntry[e.ID] = e end end
+    end
+
+    -- 1) every Bind* object, grouped by the block that owns it (the target)
+    local bindObjs = {}
+    for blk in pairs(blockToId) do
+        local list = {}
+        local function scan(parent)
+            for _, ch in ipairs(parent:GetChildren()) do
+                if ch.Name:sub(1, 4) == "Bind" then list[#list + 1] = ch end
+            end
+        end
+        scan(blk)
+        local pp = blk:FindFirstChild("PPart")
+        if pp then scan(pp) end
+        if #list > 0 then bindObjs[blk] = list end
+    end
+
+    local seen, rows, count = {}, {}, 0
+    local function addRel(ctrl, target, bo)
+        if ctrl == target then return end
+        local cid, tid = blockToId[ctrl], blockToId[target]
+        if not cid or not tid then return end
+        local k = cid .. ":" .. tid .. ":" .. bo.Name
+        if seen[k] then return end
+        seen[k] = true
+        rows[cid] = rows[cid] or {}
+        table.insert(rows[cid], {tid, bo.Name, bindReadKey(bo)})
+        count = count + 1
+    end
+
+    -- 0) REAL structure (from dump): the target block holds ObjectValue "ControllerRef" -> controller block;
+    --    its Bind* IntValues (BindFire / BindUp / BindDown) are the actions that get connected
+    for target, list in pairs(bindObjs) do
+        local cref = target:FindFirstChild("ControllerRef")
+        if not cref then
+            local pp = target:FindFirstChild("PPart")
+            cref = pp and pp:FindFirstChild("ControllerRef")
+        end
+        if cref and cref:IsA("ObjectValue") and typeof(cref.Value) == "Instance" then
+            local c = bindBlockOf(cref.Value, playerBlocks)
+            if c then
+                for _, bo in ipairs(list) do addRel(c, target, bo) end
+            end
+        end
+    end
+
+    if count == 0 then  -- guessing strategies, only when ControllerRef is not present
+    -- 2) forward: the bind object itself (or something inside it) points at the controller
+    for target, list in pairs(bindObjs) do
+        for _, bo in ipairs(list) do
+            if bo:IsA("ObjectValue") and typeof(bo.Value) == "Instance" then
+                local c = bindBlockOf(bo.Value, playerBlocks)
+                if c then addRel(c, target, bo) end
+            end
+            for _, d in ipairs(bo:GetDescendants()) do
+                if d:IsA("ObjectValue") and typeof(d.Value) == "Instance" then
+                    local c = bindBlockOf(d.Value, playerBlocks)
+                    if c then addRel(c, target, bo) end
+                end
+            end
+        end
+    end
+
+    -- 3) reverse: the controller holds a reference to the bind object / its owner
+    for ctrl in pairs(blockToId) do
+        for _, d in ipairs(ctrl:GetDescendants()) do
+            if d:IsA("ObjectValue") and typeof(d.Value) == "Instance" then
+                local v = d.Value
+                local tgt = bindBlockOf(v, playerBlocks)
+                if tgt and tgt ~= ctrl then
+                    if v.Name:sub(1, 4) == "Bind" then
+                        addRel(ctrl, tgt, v)
+                    elseif bindObjs[tgt] and isControllerName(ctrl.Name) then
+                        local bl = bindObjs[tgt]
+                        if #bl == 1 then
+                            addRel(ctrl, tgt, bl[1])
+                        else
+                            for _, bo in ipairs(bl) do
+                                if d.Name == bo.Name or d.Name:find(bo.Name, 1, true) then addRel(ctrl, tgt, bo) end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    end -- count == 0
+
+    for cid, list in pairs(rows) do
+        local e = idToEntry[cid]
+        if e then e.BindTable = list end
+    end
+    lastCopyStats.binds = count
+
+    -- 4) always write a structure dump next to the save so a failed detection can be diagnosed
+    pcall(function()
+        local out = {"Found links: " .. count}
+        for cid, list in pairs(rows) do
+            for _, r in ipairs(list) do
+                local cb, tb = idToBlock[cid], idToBlock[r[1]]
+                out[#out + 1] = string.format("  %s(id %s) -> %s(id %s).%s key=%s",
+                    cb and cb.Name or "?", tostring(cid), tb and tb.Name or "?", tostring(r[1]), tostring(r[2]), tostring(r[3]))
+            end
+        end
+        out[#out + 1] = "---- Bind objects ----"
+        for blk, list in pairs(bindObjs) do
+            out[#out + 1] = "== " .. blk.Name .. " (id " .. tostring(blockToId[blk]) .. ")"
+            for _, bo in ipairs(list) do
+                out[#out + 1] = "  " .. describeInst(bo) .. "   parent=" .. bo.Parent.Name
+                for _, d in ipairs(bo:GetDescendants()) do out[#out + 1] = "    " .. describeInst(d) end
+            end
+        end
+        out[#out + 1] = "---- ObjectValues inside controller-like blocks ----"
+        for blk, id in pairs(blockToId) do
+            if isControllerName(blk.Name) then
+                for _, d in ipairs(blk:GetDescendants()) do
+                    if d:IsA("ObjectValue") then out[#out + 1] = "  " .. blk.Name .. "(id " .. tostring(id) .. "): " .. describeInst(d) end
+                end
+            end
+            if #out > 900 then break end
+        end
+        writefile("bind_dump.txt", table.concat(out, "\n"))
+    end)
+    return count
+end
+
 local function copyBuild()
     if not selectedPlayer then return nil end
+    lastCopyStats = {pistons = 0, open = 0, binds = 0}
     local playerBlocks = BlocksFolder:FindFirstChild(selectedPlayer.Name)
     if not playerBlocks then return nil end
     local playerZone = getPlayerZone(selectedPlayer)
@@ -2551,8 +2873,19 @@ local function copyBuild()
                 end
             end
             if block.Name:find("Piston") then
+                -- open state: prefer the Forward attribute (block, then PPart), fall back to a LastDirection value
                 local fwd = block:GetAttribute("Forward")
-                numVals.LastDirection = (fwd == true) and 1 or 0
+                if fwd == nil then fwd = ppart:GetAttribute("Forward") end
+                local open = (fwd == true)
+                if fwd == nil then
+                    local ldv = block:FindFirstChild("LastDirection", true)
+                    if ldv and (ldv:IsA("NumberValue") or ldv:IsA("IntValue")) then
+                        open = (ldv.Value == 1)
+                    end
+                end
+                numVals.LastDirection = open and 1 or 0
+                lastCopyStats.pistons = lastCopyStats.pistons + 1
+                if open then lastCopyStats.open = lastCopyStats.open + 1 end
             end
             if next(boolVals) then entry.BoolValues = boolVals end
             if next(numVals) then entry.NumberValues = numVals end
@@ -2560,93 +2893,7 @@ local function copyBuild()
             idToBlock[idCounter - 1] = block
         end
     end
-    do
-        local BKEYS = {"BindFire","BindActivate","BindUp","BindLeft","BindDown","BindRight"}
-        local CONTROLLER_NAMES = {
-            SwitchBig = true, Button = true, CarSeat = true, Switch = true,
-            SensorBlock = true, RemoteController = true, PilotSeat = true,
-            Lever = true, Gate = true, Delay = true,
-        }
-        local tBinds = {}
-        for _, blk in pairs(playerBlocks:GetChildren()) do
-            if blk:FindFirstChild("PPart") then
-                for _, bk in ipairs(BKEYS) do
-                    local bv = blk:FindFirstChild(bk)
-                    if bv then
-                        local keyCode = nil
-                        local kc = bv:FindFirstChild("DefaultInputKeyCode")
-                        if kc and (kc:IsA("IntValue") or kc:IsA("NumberValue")) then
-                            keyCode = kc.Value
-                        end
-                        local tid = nil
-                        if bv:IsA("ObjectValue") and bv.Value then
-                            for id2, b2 in pairs(idToBlock) do
-                                if b2 == bv.Value then tid = id2 break end
-                            end
-                        elseif bv:IsA("IntValue") or bv:IsA("NumberValue") then
-                            for id2, b2 in pairs(idToBlock) do
-                                if b2 == blk then tid = id2 break end
-                            end
-                        end
-                        if tid then
-                            tBinds[tid] = tBinds[tid] or {}
-                            table.insert(tBinds[tid], {bk, keyCode or bv.Value or -1})
-                        end
-                    end
-                end
-            end
-        end
-        for _, blk in pairs(playerBlocks:GetChildren()) do
-            if not blk:FindFirstChild("PPart") then continue end
-            if not CONTROLLER_NAMES[blk.Name] then continue end
-            local bid = nil
-            for id2, b2 in pairs(idToBlock) do if b2 == blk then bid = id2 break end end
-            if not bid then continue end
-            local bEntry = nil
-            for _, ent in ipairs(buildData[blk.Name] or {}) do
-                if ent.ID == bid then bEntry = ent break end
-            end
-            if not bEntry then continue end
-            local bSet = {}
-            for _, ch in pairs(blk:GetChildren()) do
-                if ch:IsA("ObjectValue") and ch.Value then
-                    for id2, b2 in pairs(idToBlock) do if b2 == ch.Value then bSet[id2] = true break end end
-                end
-            end
-            local pp2 = blk:FindFirstChild("PPart")
-            if pp2 then
-                for _, ch in pairs(pp2:GetChildren()) do
-                    if ch:IsA("ObjectValue") and ch.Value then
-                        for id2, b2 in pairs(idToBlock) do if b2 == ch.Value then bSet[id2] = true break end end
-                    end
-                end
-            end
-            local bt = {}
-            for tid, bds in pairs(tBinds) do
-                if bSet[tid] then
-                    for _, bd in ipairs(bds) do table.insert(bt, {tid, bd[1], bd[2]}) end
-                end
-            end
-            local hasT = false
-            for _ in pairs(tBinds) do hasT = true break end
-            if #bt == 0 and hasT then
-                local asgn = {}
-                for bn2, _ in pairs(buildData) do
-                    for _, e2 in ipairs(buildData[bn2]) do
-                        if e2.BindTable then
-                            for _, r in ipairs(e2.BindTable) do if r[1] then asgn[r[1]] = true end end
-                        end
-                    end
-                end
-                for tid, bds in pairs(tBinds) do
-                    if not asgn[tid] then
-                        for _, bd in ipairs(bds) do table.insert(bt, {tid, bd[1], bd[2]}) end
-                    end
-                end
-            end
-            if #bt > 0 then bEntry.BindTable = bt end
-        end
-    end
+    collectBinds(playerBlocks, idToBlock, buildData)
     return buildData
 end
 
@@ -2693,6 +2940,115 @@ local function createPreview(buildData, selBlock)
     local targetT = Settings.previewTransparency
     local allFadeParts = {}
     local created = 0
+    local idPos = {}       -- build ID -> world position (for the connection lines)
+    local idBlock = {}     -- build ID -> preview block
+    local pInfo = {total = 0, open = 0, done = 0, how = {}, err = nil}
+    local bindEntries = {} -- controllers that carry a BindTable
+
+    -- slides the moving part(s) of a cloned piston forward (same as an opened piston).
+    -- Tries: constraint axis -> joint/weld partner -> any extra part -> a synthetic rod.
+    local function extendPiston(pb, dist)
+        local pp = pb:FindFirstChild("PPart")
+        if not pp then return end
+        local moving, axis
+        local usedMethod = "rod"
+        local function longAxis(part)
+            local sz = part.Size
+            local cf = part.CFrame
+            if sz.X >= sz.Y and sz.X >= sz.Z then return cf.XVector end
+            if sz.Y >= sz.Z then return cf.YVector end
+            return cf.ZVector
+        end
+        local function awayFrom(part, vec)
+            local rel = part.Position - pp.Position
+            local d = rel:Dot(vec)
+            if math.abs(d) > 0.05 and d < 0 then return -vec end
+            return vec
+        end
+        -- 1) constraint with an attachment on PPart
+        for _, d in ipairs(pb:GetDescendants()) do
+            if d:IsA("Constraint") and d.Attachment0 and d.Attachment1 then
+                local p0, p1 = d.Attachment0.Parent, d.Attachment1.Parent
+                if p0 and p1 and p0:IsA("BasePart") and p1:IsA("BasePart") and (p0 == pp) ~= (p1 == pp) then
+                    moving = (p0 == pp) and p1 or p0
+                    local att = (p0 == pp) and d.Attachment0 or d.Attachment1
+                    axis = awayFrom(moving, att.WorldAxis)
+                    usedMethod = "constraint"
+                    break
+                end
+            end
+        end
+        -- 2) a joint / weld between PPart and another part
+        if not moving then
+            for _, d in ipairs(pb:GetDescendants()) do
+                if (d:IsA("JointInstance") or d:IsA("WeldConstraint")) and d.Part0 and d.Part1 and (d.Part0 == pp) ~= (d.Part1 == pp) then
+                    moving = (d.Part0 == pp) and d.Part1 or d.Part0
+                    break
+                end
+            end
+            if moving then axis = awayFrom(moving, longAxis(moving)) ; usedMethod = "joint" end
+        end
+        -- 3) any other part: take the biggest one
+        if not moving then
+            local best, bestVol = nil, -1
+            for _, d in ipairs(pb:GetDescendants()) do
+                if d:IsA("BasePart") and d ~= pp then
+                    local vol = d.Size.X * d.Size.Y * d.Size.Z
+                    if vol > bestVol then best, bestVol = d, vol end
+                end
+            end
+            if best then
+                moving = best
+                axis = awayFrom(moving, longAxis(moving))
+                usedMethod = "part"
+            end
+        end
+        -- 4) nothing to move: draw a synthetic rod out of the piston's long side
+        if not moving then
+            local dir = longAxis(pp)
+            local len = dist and dist > 0 and dist or math.max(pp.Size.X, pp.Size.Y, pp.Size.Z)
+            local thick = math.max(0.4, math.min(pp.Size.X, pp.Size.Y, pp.Size.Z) * 0.6)
+            local rod = Instance.new("Part")
+            rod.Name = "PreviewRod"
+            rod.Material = pp.Material
+            rod.Color = pp.Color
+            rod.Anchored = true
+            rod.CanCollide = false
+            local half = (math.max(pp.Size.X, pp.Size.Y, pp.Size.Z)) / 2
+            local look = dir
+            local up = math.abs(look:Dot(Vector3.yAxis)) > 0.95 and Vector3.xAxis or Vector3.yAxis
+            rod.Size = Vector3.new(thick, thick, len)
+            rod.CFrame = CFrame.lookAt(pp.Position + dir * (half + len / 2), pp.Position + dir * (half + len), up)
+            rod.Parent = pb
+            return "rod"
+        end
+        if not dist or dist <= 0 then
+            dist = math.max(moving.Size.X, moving.Size.Y, moving.Size.Z)
+        end
+        local group, queue = {[moving] = true}, {moving}
+        local links = {}
+        for _, d in ipairs(pb:GetDescendants()) do
+            if (d:IsA("WeldConstraint") or d:IsA("JointInstance")) and d.Part0 and d.Part1 then
+                links[#links + 1] = d
+            end
+        end
+        local qi = 1
+        while qi <= #queue do
+            local cur = queue[qi] ; qi = qi + 1
+            for _, w in ipairs(links) do
+                local other = (w.Part0 == cur and w.Part1) or (w.Part1 == cur and w.Part0) or nil
+                if other and other ~= pp and not group[other] then
+                    group[other] = true
+                    queue[#queue + 1] = other
+                end
+            end
+        end
+        for part in pairs(group) do
+            pcall(function() part.CFrame = part.CFrame + axis.Unit * dist end)
+        end
+        return usedMethod
+    end
+
     for blockName, blocks in pairs(buildData) do
         local tmpl = BuildingParts:FindFirstChild(blockName)
         if not tmpl then continue end
@@ -2723,6 +3079,38 @@ local function createPreview(buildData, selBlock)
                 if rawCol and rawCol ~= "" then
                     pcall(function() pb.PPart.Color = strCol(tostring(rawCol)) end)
                 end
+                if bi.ID ~= nil then
+                    idPos[bi.ID] = worldCF.Position ; idPos[tostring(bi.ID)] = worldCF.Position
+                    idBlock[bi.ID] = pb ; idBlock[tostring(bi.ID)] = pb
+                end
+                if type(bi.BindTable) == "table" and next(bi.BindTable) then
+                    bindEntries[#bindEntries + 1] = {id = bi.ID, pos = worldCF.Position, rows = bi.BindTable}
+                end
+                if blockName:find("Piston") then
+                    pInfo.total = pInfo.total + 1
+                    local nv = bi.NumberValues or {}
+                    local ex = bi.ASUExtra or {}
+                    local ld = tonumber(nv.LastDirection) or tonumber(ex.LastDirection) or tonumber(nv.LastDirrection)
+                    if ld == 1 then
+                        pInfo.open = pInfo.open + 1
+                        local len = tonumber(nv.ExtendLength) or tonumber(ex.ExtendLength)
+                        if not len then
+                            for _, d in ipairs(pb:GetDescendants()) do
+                                if d:IsA("PrismaticConstraint") and d.UpperLimit and d.UpperLimit > 0 and d.UpperLimit < 60 then
+                                    len = d.UpperLimit
+                                    break
+                                end
+                            end
+                        end
+                        local okE, how = pcall(extendPiston, pb, len and (len * sc) or nil)
+                        if okE and how then
+                            pInfo.done = pInfo.done + 1
+                            pInfo.how[how] = (pInfo.how[how] or 0) + 1
+                        elseif not okE then
+                            pInfo.err = tostring(how)
+                        end
+                    end
+                end
                 pb.PPart.Transparency = 1
                 pb.PPart.CanCollide = false
                 pb.PPart.Anchored = true
@@ -2752,6 +3140,71 @@ local function createPreview(buildData, selBlock)
                 if created % 80 == 0 then task.wait() end
             end
         end
+    end
+    -- connection effect (like the game's bind tool): ONE yellow -> magenta dashed trail per
+    -- controller/target pair, yellow frame on the controller, purple frame on the target
+    do
+        local YEL, MAG = Color3.fromRGB(255, 205, 0), Color3.fromRGB(190, 40, 200)
+        local drawn, totalDash = {}, 0
+        local framed = {}
+        local function frame(blk, col)
+            if not blk or framed[blk] then return end
+            framed[blk] = true
+            local pp = blk:FindFirstChild("PPart")
+            if not pp then return end
+            local sb = Instance.new("SelectionBox")
+            sb.Adornee = pp
+            sb.Color3 = col
+            sb.SurfaceTransparency = 1
+            sb.LineThickness = 0.04
+            sb.Parent = blk
+        end
+        for _, ent in ipairs(bindEntries) do
+            for _, row in pairs(ent.rows) do
+                if type(row) == "table" then
+                    local tpos = idPos[row[1]] or idPos[tostring(row[1])]
+                    local pk = tostring(ent.id) .. ">" .. tostring(row[1])
+                    if tpos and not drawn[pk] then
+                        drawn[pk] = true
+                        frame(idBlock[ent.id] or idBlock[tostring(ent.id)], YEL)
+                        frame(idBlock[row[1]] or idBlock[tostring(row[1])], MAG)
+                        local a, b = ent.pos, tpos
+                        local dir = b - a
+                        local len = dir.Magnitude
+                        if len > 0.05 then
+                            local period = totalDash > 400 and 3 or 1.0
+                            local n = math.max(2, math.floor(len / period))
+                            totalDash = totalDash + n
+                            local dashLen = math.min(period * 0.6, len / n)
+                            for i = 0, n - 1 do
+                                local t = (i + 0.5) / n
+                                local dash = Instance.new("Part")
+                                dash.Name = "BindDash"
+                                dash.Anchored = true
+                                dash.CanCollide = false
+                                dash.CanQuery = false
+                                dash.CanTouch = false
+                                dash.CastShadow = false
+                                dash.Material = Enum.Material.SmoothPlastic
+                                dash.Color = YEL:Lerp(MAG, t)
+                                dash.Transparency = 0.25
+                                dash.Size = Vector3.new(0.22, 0.22, dashLen)
+                                dash.CFrame = CFrame.lookAt(a:Lerp(b, t), b)
+                                dash.Parent = PreviewFolder
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    do
+        local hs = {}
+        for k, v in pairs(pInfo.how) do hs[#hs + 1] = k .. "x" .. v end
+        PreviewFolder:SetAttribute("Info", string.format("pistons %d, open %d, extended %d%s%s",
+            pInfo.total, pInfo.open, pInfo.done,
+            #hs > 0 and (" (" .. table.concat(hs, ",") .. ")") or "",
+            pInfo.err and (" ERR: " .. pInfo.err:sub(1, 90)) or ""))
     end
     previewActive = true
     if updatePreviewButtonGlobal then updatePreviewButtonGlobal() end
@@ -2877,12 +3330,45 @@ function API.loadedName() return loadedName end
 function API.setSelectedPlayer(p) selectedPlayer = p end
 function API.getSelectedPlayer() return selectedPlayer end
 
+function API.getPreviewInfo() return PreviewFolder:GetAttribute("Info") end
+
 function API.requestStop()
     if isBuilding then
         stopBuild = true
         return true
     end
     return false
+end
+
+-- deletes every build file called <name> inside SOPERA_WORKSPACE; returns true, or false + error text
+function API.deleteBuild(name)
+    if type(delfile) ~= "function" then return false, "This executor has no delfile" end
+    if type(name) ~= "string" or name == "" then return false, "No file name" end
+    local removed, failed = 0, nil
+    local function scanDir(dir, depth)
+        if depth > 3 then return end
+        local ok, items = pcall(listfiles, dir)
+        if not ok or type(items) ~= "table" then return end
+        for _, fp in ipairs(items) do
+            if isfolder(fp) then
+                scanDir(fp, depth + 1)
+            else
+                local n = fp:match("([^/\\]+)%.[Bb]uild$") or fp:match("([^/\\]+)%.json$") or fp:match("([^/\\]+)%.[Bb][Hh]$")
+                if n and n:lower() == name:lower() then
+                    local okD, errD = pcall(delfile, fp)
+                    if okD then removed = removed + 1 else failed = tostring(errD) end
+                end
+            end
+        end
+    end
+    scanDir(FOLDER_PATH, 0)
+    if removed == 0 then return false, failed or ("File not found: " .. name) end
+    if loadedName and loadedName:lower() == name:lower() then
+        currentBuild = nil
+        loadedName = nil
+        clearPreview()
+    end
+    return true
 end
 
 -- loads a build file into memory; returns blockCount, or nil + error text
@@ -2958,7 +3444,7 @@ function API.saveSelected(fileName)
         for _, bl in pairs(buildData) do
             if type(bl) == "table" then count = count + #bl end
         end
-        return count, fmt, fn
+        return count, fmt, fn, {pistons = lastCopyStats.pistons, open = lastCopyStats.open, binds = lastCopyStats.binds}
     end
     return nil, "Save failed!"
 end
@@ -4066,10 +4552,55 @@ do
                         TextTruncate = Enum.TextTruncate.AtEnd,
                     }, list)
                     corner(btn, 8)
-                    new("UIPadding", {PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 8)}, btn)
+                    new("UIPadding", {PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 54)}, btn)
                     local bar = new("Frame", {BackgroundColor3 = C.accent, BorderSizePixel = 0,
                         Position = UDim2.new(0, -10, 0, 6), Size = UDim2.new(0, 3, 1, -12), Visible = false}, btn)
                     corner(bar, "full")
+                    -- delete button: 1st click asks "Sure?", 2nd click (within 4s) deletes the file
+                    local delBtn = new("TextButton", {
+                        Text = "Delete", Font = FONT_M, TextSize = 10, TextColor3 = C.sub, AutoButtonColor = false,
+                        BackgroundColor3 = C.cardHi, BorderSizePixel = 0,
+                        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 50, 0.5, 0),
+                        Size = UDim2.new(0, 46, 0, 22), ZIndex = 3,
+                    }, btn)
+                    corner(delBtn, 6)
+                    local armed, armToken = false, 0
+                    delBtn.MouseButton1Click:Connect(function()
+                        if not armed then
+                            armed = true
+                            armToken = armToken + 1
+                            local myToken = armToken
+                            delBtn.Text = "Sure?"
+                            delBtn.TextColor3 = rgb(255, 255, 255)
+                            tween(delBtn, 0.12, {BackgroundColor3 = C.bad})
+                            Hub.status("Press Sure? again to delete " .. name, "info")
+                            task.delay(4, function()
+                                if armed and armToken == myToken and delBtn.Parent then
+                                    armed = false
+                                    delBtn.Text = "Delete"
+                                    delBtn.TextColor3 = C.sub
+                                    tween(delBtn, 0.12, {BackgroundColor3 = C.cardHi})
+                                end
+                            end)
+                            return
+                        end
+                        armed = false
+                        local okD, errD = AB.deleteBuild(name)
+                        if okD then
+                            if S.autoBuildFile == name then
+                                S.autoBuildFile = ""
+                                AB.saveFarm()
+                                showSelected(nil)
+                            end
+                            Hub.status("Deleted " .. name, "good")
+                            populate()
+                        else
+                            delBtn.Text = "Delete"
+                            delBtn.TextColor3 = C.sub
+                            tween(delBtn, 0.12, {BackgroundColor3 = C.cardHi})
+                            Hub.status(errD or "Delete failed", "bad")
+                        end
+                    end)
                     local r = {btn = btn, bar = bar}
                     rows[name] = r
                     setRowOn(r, name == S.autoBuildFile)
@@ -4162,7 +4693,7 @@ do
                 end
                 local ok = AB.createPreview()
                 if ok then
-                    Hub.status("Preview created - ghost blocks are shown on your plot", "good")
+                    Hub.status("Preview created - " .. tostring(AB.getPreviewInfo and AB.getPreviewInfo() or ""), "good")
                 else
                     Hub.status("Preview failed (no plot zone?)", "bad")
                 end
@@ -4501,10 +5032,11 @@ do
             if not AB.getSelectedPlayer() then Hub.status("Select a player first (step 1)", "bad") return end
             Hub.status("Copying build from " .. AB.getSelectedPlayer().Name .. "...", "info")
             task.spawn(function()
-                local count, fmt, fn = AB.saveSelected(nameBox.Text)
+                local count, fmt, fn, st = AB.saveSelected(nameBox.Text)
                 if count then
                     refreshFiles()
-                    Hub.status("Saved " .. count .. " blocks to " .. fn .. " (" .. tostring(fmt or "?") .. ")", "good")
+                    Hub.status("Saved " .. count .. " blocks to " .. fn .. " (" .. tostring(fmt or "?") .. ")"
+                        .. (st and ("  |  pistons " .. st.pistons .. " (open " .. st.open .. ")  |  binds " .. st.binds) or ""), "good")
                 else
                     Hub.status(fmt or "Save failed!", "bad")
                 end
