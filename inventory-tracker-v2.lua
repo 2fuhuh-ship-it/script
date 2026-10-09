@@ -1,7 +1,3 @@
--- Auto Build Hub (loader)
--- Run THIS file. It keeps the full script in memory (needed by the Inventory slot finder's server hop)
--- and also saves a copy to your workspace as "AutoBuildHub.lua".
-local SRC = [==[
 --[[
     AUTO BUILD  v3   (Delta / Luau)   -   one window, three tabs
       [Auto Build]  MAIN: choose a build file -> Preview -> Build Now / Stop,
@@ -57,7 +53,8 @@ local BlockData = safeWaitChild(LocalPlayer, "Data", 30)
 ------------------------------------------------------------------
 -- Paths / settings
 ------------------------------------------------------------------
-local FOLDER_PATH = "SOPERA_WORKSPACE"
+local FOLDER_PATH = "Auto Build Workspace"
+local OLD_FOLDER_PATH = "SOPERA_WORKSPACE"   -- previous folder name (its files are copied over once)
 local FOLDER_PREFIX = FOLDER_PATH .. "/"
 local SETTINGS_PATH = "SoPeRa2_Settings.json"
 local FARM_SETTINGS_PATH = "SPRB_FarmSettings.json"
@@ -76,9 +73,31 @@ local Settings = {
 
 local farmSettings = { autoBuild = false, autoBuildFile = "" }
 
+local function copyOldFolder(from, to)
+    local okL, list = pcall(listfiles, from)
+    if not okL or type(list) ~= "table" then return end
+    for _, path in ipairs(list) do
+        local name = tostring(path):match("([^/\\]+)$")
+        if name then
+            if isfolder(path) then
+                pcall(function()
+                    if not isfolder(to .. "/" .. name) then makefolder(to .. "/" .. name) end
+                    copyOldFolder(path, to .. "/" .. name)
+                end)
+            else
+                pcall(function()
+                    if not isfile(to .. "/" .. name) then writefile(to .. "/" .. name, readfile(path)) end
+                end)
+            end
+        end
+    end
+end
+
 local function ensureFolder()
     if isfolder(FOLDER_PATH) then return end
     makefolder(FOLDER_PATH)
+    -- first run with the new name: bring your old saved builds along
+    if isfolder(OLD_FOLDER_PATH) then pcall(copyOldFolder, OLD_FOLDER_PATH, FOLDER_PATH) end
 end
 
 -- Reuse the original script's build settings (scale / offset / speed) if present
@@ -1432,7 +1451,7 @@ local function pasteBuild(buildData, statusCb)
     end
 
     local function applyBindTables(styledList, p0, p1)
-        local BIND_DEBUG_REPORT = false  -- true = 連接後複製錯誤回報到剪貼簿
+        local BIND_DEBUG_REPORT = false  -- true = copy an error report to the clipboard after binding
         local bindLog = {}
         local function blog(t) bindLog[#bindLog + 1] = t end
         local function path(x)
@@ -3340,7 +3359,7 @@ function API.requestStop()
     return false
 end
 
--- deletes every build file called <name> inside SOPERA_WORKSPACE; returns true, or false + error text
+-- deletes every build file called <name> inside the Auto Build Workspace folder; returns true, or false + error text
 function API.deleteBuild(name)
     if type(delfile) ~= "function" then return false, "This executor has no delfile" end
     if type(name) ~= "string" or name == "" then return false, "No file name" end
@@ -3464,6 +3483,7 @@ local Config = {
     AutoSelectSelf = true,
     ShakeFx = true,
     ToggleKey = Enum.KeyCode.RightShift,
+    AutoRunAfterTeleport = true,   -- re-run this script by itself after every teleport / server hop (loaded from ScriptUrl, nothing saved)
     AutoBuildDelay = 8,   -- seconds to wait after joining before "Auto Build on Join" starts
     ChatDbUrl = "https://build-a-boat-chat-default-rtdb.firebaseio.com",       -- World Chat database URL (Firebase Realtime Database). Leave "" to set it inside the chat tab
     ChatPoll = 2.5,       -- seconds between chat refreshes
@@ -3471,12 +3491,9 @@ local Config = {
     Scale = 0.85,   -- max UI size (1 = full size); it also auto-shrinks on small screens
 
     -- ---------- Slot finder (server hop) ----------
-    FindFile = "InventoryTracker_find.json",  -- local save file (executor workspace folder)
-    -- The script must reload itself after every teleport. Use ONE of these:
-    --   ScriptUrl : raw link of this script (loadstring(game:HttpGet(url)))
-    --   ScriptFile: save this script in your executor's workspace folder with this exact name
-    ScriptUrl = "",
-    ScriptFile = "AutoBuildHub.lua",
+    -- After every server hop the script reloads itself from this link (nothing is saved locally):
+    --   loadstring(game:HttpGet(ScriptUrl))()
+    ScriptUrl = "https://raw.githubusercontent.com/hvhscriptbu/BABFT/refs/heads/main/script",
     SearchSelf = false,     -- also search your own slots in each server
     ScanMinStay = 2.5,      -- seconds to wait in a server before giving up on it (if data is loaded)
     ScanTimeout = 9,        -- max seconds to wait for slot data to load in a server
@@ -4484,12 +4501,12 @@ do
 
         -- ===== left card: step 1 - choose a build file
         local left = kit.card(page, UDim2.new(0, 8, 0, 8), UDim2.new(0, 300, 1, -16))
-        kit.heading(left, "1", "Choose a build", "Pick a saved file from your SOPERA_WORKSPACE folder.\nIt will be the one that gets built.")
+        kit.heading(left, "1", "Choose a build", "Pick a saved file from your Auto Build Workspace folder.\nIt will be the one that gets built.")
         local search = kit.input(left, "Search files...", "", UDim2.new(0, 10, 0, 58), UDim2.new(1, -82, 0, 30))
         local reloadBtn = kit.button(left, "Reload", "ghost", UDim2.new(1, -66, 0, 58), UDim2.new(0, 56, 0, 30))
         local list = scrollList(left, UDim2.new(0, 10, 0, 96), UDim2.new(1, -20, 1, -150))
         local emptyLbl = label({
-            Text = "No build files found.\nPut .Build / .json files into SOPERA_WORKSPACE, or save one from the Copy Build tab.",
+            Text = "No build files found.\nPut .Build / .json files into the Auto Build Workspace folder, or save one from the Copy Build tab.",
             TextSize = 11, TextColor3 = C.sub, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center,
             Position = UDim2.new(0, 16, 0, 110), Size = UDim2.new(1, -32, 0, 80), Visible = false,
         }, left)
@@ -5187,7 +5204,7 @@ do
             BackgroundColor3 = C.line, BackgroundTransparency = 0.4, BorderSizePixel = 0}, chatUI)
 
         local msgScroll = scrollList(chatUI, UDim2.new(0, 8, 0, 58), UDim2.new(1, -16, 1, -106))
-        local inputBox = kit.input(chatUI, "Type a message (中文 / English)...", "",
+        local inputBox = kit.input(chatUI, "Type a message...", "",
             UDim2.new(0, 10, 1, -42), UDim2.new(1, -90, 0, 32))
         local sendBtn = kit.button(chatUI, "Send", "primary", UDim2.new(1, -72, 1, -42), UDim2.new(0, 62, 0, 32))
 
@@ -5423,14 +5440,15 @@ do
             if not goodTime(ts, nowMs) then ts = keyTime(key) end
             if not goodTime(ts, nowMs) then ts = nowMs end   -- fixed at receive time, never changes afterwards
             return {uid = uid, name = name, display = tostring(d.d or name), text = text,
-                ts = ts, key = key, mine = (uid == me.UserId)}
+                ts = ts, key = key, mine = (uid == me.UserId),
+                to = tonumber(d.to), toName = d.tn and tostring(d.tn) or nil, toDisplay = d.td and tostring(d.td) or nil}
         end
 
         local function fetchPath(path, onMsg)
             if dbUrl == "" then return false, "no url" end
             local url = dbUrl .. "/" .. path .. ".json?orderBy=%22%24key%22"
             local lk = lastKey[path]
-            if lk then url = url .. "&startAt=%22" .. lk .. "%22" else url = url .. "&limitToLast=40" end
+            if lk then url = url .. "&startAt=%22" .. lk .. "%22" else url = url .. "&limitToLast=" .. ((path == "world") and 40 or 200) end   -- private chats keep a longer history
             local body, err = http("GET", url)
             if not body then return false, err end
             local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
@@ -5454,6 +5472,16 @@ do
 
         local function onWorld(m) addMessage("world", m, true) end
         local function onDM(m)
+            if m.mine and m.to then
+                -- a copy of a private message I SENT (stored in my own inbox so it survives reloads / rejoins)
+                if m.to == me.UserId then return end
+                local k = tostring(m.to)
+                local nm = m.toName or ("User " .. k)
+                getThread(k, m.toDisplay or nm, m.to, nm)
+                addMessage(k, m, initialLoad)
+                return
+            end
+            if m.mine then return end   -- old-style entry without a recipient: nothing to attach it to
             local k = tostring(m.uid)
             getThread(k, m.display, m.uid, m.name)
             addMessage(k, m, initialLoad)
@@ -5495,8 +5523,16 @@ do
                 if key == "world" then
                     pollWorld()
                 else
-                    addMessage(key, {uid = me.UserId, name = me.Name, display = me.DisplayName, text = text,
-                        ts = os.time() * 1000, mine = true})
+                    -- keep a copy in MY inbox too, so the conversation is still there after a reload / rejoin
+                    local copy = {id = me.UserId, n = me.Name, d = me.DisplayName, t = text,
+                        ts = {[".sv"] = "timestamp"}, to = t.userId, tn = t.user or t.name, td = t.name}
+                    local okCopy = http("POST", dbUrl .. "/dm/" .. tostring(me.UserId) .. ".json", HttpService:JSONEncode(copy))
+                    if okCopy then
+                        fetchPath("dm/" .. tostring(me.UserId), onDM)
+                    else
+                        addMessage(key, {uid = me.UserId, name = me.Name, display = me.DisplayName, text = text,
+                            ts = os.time() * 1000, mine = true})
+                    end
                 end
             end)
         end
@@ -5999,7 +6035,36 @@ corner(FindBtn, 8)
 pressFx(FindBtn)
 local FindStatus = label({Text = "", TextSize = 10, TextColor3 = C.sub, TextWrapped = true,
     TextYAlignment = Enum.TextYAlignment.Center,
-    Position = UDim2.new(0, 228, 0, 0), Size = UDim2.new(1, -228, 1, 0)}, FindBar)
+    Position = UDim2.new(0, 262, 0, 0), Size = UDim2.new(1, -262, 1, 0)}, FindBar)
+
+-- "?" button + how-to panel for the server finder
+local FindUI = {open = true}
+FindUI.btn = new("TextButton", {
+    Text = "?", Font = FONT_B, TextSize = 14, TextColor3 = C.accent, AutoButtonColor = false,
+    BackgroundColor3 = C.panel, BorderSizePixel = 0,
+    Position = UDim2.new(0, 226, 0, 0), Size = UDim2.new(0, 28, 1, 0),
+}, FindBar)
+corner(FindUI.btn, 8)
+pressFx(FindUI.btn)
+FindUI.help = new("Frame", {
+    Name = "FindHelp", Position = UDim2.new(0, 0, 0, 220), Size = UDim2.new(1, 0, 1, -220),
+    BackgroundColor3 = C.panel, BorderSizePixel = 0, Visible = false, ZIndex = 5,
+}, Content)
+corner(FindUI.help, 10)
+label({Text = "HOW TO USE  -  Server Finder", Font = FONT_B, TextSize = 12, TextColor3 = C.accent, ZIndex = 6,
+    Position = UDim2.new(0, 14, 0, 10), Size = UDim2.new(1, -28, 0, 16)}, FindUI.help)
+label({Text = table.concat({
+    "1.  Type part of a slot name in the box (not case sensitive), e.g. \"ship\".",
+    "2.  Press Find (or Enter). Every player's slots in THIS server are checked.",
+    "3.  No match? It teleports to a NEW server by itself, checks again, and keeps going.",
+    "4.  When someone has a matching slot it stops, shows that player and the slot name.",
+    "",
+    "Stop: press the red Stop button. Leaving the game also cancels the search.",
+    "Nothing is saved to your computer - the search follows you through the teleport queue, so your executor must support queue_on_teleport.",
+    "Tip: the longer / more exact the name, the fewer false matches.",
+}, "\n"), TextSize = 11, TextColor3 = C.text, TextWrapped = true, ZIndex = 6,
+    TextYAlignment = Enum.TextYAlignment.Top,
+    Position = UDim2.new(0, 14, 0, 32), Size = UDim2.new(1, -28, 1, -40)}, FindUI.help)
 
 -- ========================= UI LOGIC =========================
 local function setListMessage(text)
@@ -6401,6 +6466,7 @@ local function refreshTabVisuals()
     SortBtn.Visible = items
     SearchBar.Size = items and UDim2.new(1, -228, 0, 28) or UDim2.new(1, -136, 0, 28)
     FindBar.Visible = not items
+    FindUI.help.Visible = (not items) and FindUI.open
     ListHolder.Position = items and UDim2.new(0, 0, 0, 182) or UDim2.new(0, 0, 0, 220)
     ListHolder.Size = items and UDim2.new(1, 0, 1, -182) or UDim2.new(1, 0, 1, -220)
 end
@@ -6554,8 +6620,6 @@ local function removePlayerRow(player)
 end
 
 -- ========================= SLOT FINDER (SERVER HOP) =========================
-local hasFS = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
-
 local function trim(str)
     return (str:gsub("^%s+", ""):gsub("%s+$", ""))
 end
@@ -6564,42 +6628,32 @@ local function newFindState()
     return {query = "", active = false, visited = {}, hops = 0, hopAt = 0, placeId = 0, foundJob = ""}
 end
 
+-- The search state is NOT saved to any file. It travels inside the queued teleport script
+-- (getgenv().__InvTrackerFindState) and is read once when the script reloads in the next server.
 local findState = newFindState()
-do
-    if hasFS then
-        local ok, data = pcall(function()
-            if isfile(Config.FindFile) then
-                return HttpService:JSONDecode(readfile(Config.FindFile))
-            end
-        end)
-        if ok and type(data) == "table" then
+local resumeFlag = false   -- did this execution come from our own teleport? (set by the queued bootstrap, one-shot)
+pcall(function()
+    local env = getgenv()
+    resumeFlag = (env.__InvTrackerResume == true)
+    local raw = env.__InvTrackerFindState
+    env.__InvTrackerResume = nil
+    env.__InvTrackerFindState = nil
+    if resumeFlag and type(raw) == "string" and raw ~= "" then
+        local data = HttpService:JSONDecode(raw)
+        if type(data) == "table" then
             for k in pairs(findState) do
                 if data[k] ~= nil then findState[k] = data[k] end
             end
         end
     end
-    if type(findState.visited) ~= "table" then findState.visited = {} end
-end
-
-local function saveFindState()
-    if not hasFS then return end
-    pcall(function()
-        writefile(Config.FindFile, HttpService:JSONEncode(findState))
-    end)
-end
-
--- did this execution come from our own teleport? (set by the queued bootstrap, one-shot)
-local resumeFlag = false
-pcall(function()
-    local env = getgenv()
-    resumeFlag = (env.__InvTrackerResume == true)
-    env.__InvTrackerResume = nil
 end)
+if type(findState.visited) ~= "table" then findState.visited = {} end
+
+local function saveFindState() end   -- kept as a no-op: nothing is written to disk any more
 
 local finding = false
 local findToken = 0
 local teleportFailed = false
-local queuedThisSession = false
 
 local function getQueueFn()
     local ok, fn = pcall(function()
@@ -6611,22 +6665,47 @@ local function getQueueFn()
 end
 
 local function getBootstrap()
-    local pre = "getgenv().__InvTrackerResume = true\n"
-    if Config.ScriptUrl ~= "" then
-        return pre .. "loadstring(game:HttpGet(\"" .. Config.ScriptUrl .. "\"))()"
+    if Config.ScriptUrl == "" then return nil end
+    -- the queued code runs inside the NEW server: wait for the game, then download + run the script (with retries)
+    local lines = {'getgenv().__InvTrackerResume = true'}
+    if findState.active and findState.query ~= "" then
+        -- hand the running search over to the next server (written first, so the newest queued copy wins)
+        local okJ, json = pcall(function() return HttpService:JSONEncode(findState) end)
+        if okJ then lines[#lines + 1] = 'getgenv().__InvTrackerFindState = ' .. string.format("%q", json) end
     end
-    -- preferred: the loader leaves the full source in getgenv, so no file is needed
-    local OPEN, CLOSE = "[" .. "==[", "]" .. "==]"   -- built in pieces so they never end a long string early
-    local okS, embedded = pcall(function() return getgenv().__InvTrackerSrc end)
-    if okS and type(embedded) == "string" and embedded ~= "" and not string.find(embedded, CLOSE, 1, true) then
-        return pre .. "getgenv().__InvTrackerSrc = " .. OPEN .. "\n" .. embedded .. "\n" .. CLOSE
-            .. "\nloadstring(getgenv().__InvTrackerSrc)()"
-    end
-    local ok, exists = pcall(function() return hasFS and isfile(Config.ScriptFile) end)
-    if ok and exists then
-        return pre .. "loadstring(readfile(\"" .. Config.ScriptFile .. "\"))()"
-    end
-    return nil
+    for _, l in ipairs({
+        'local e = getgenv()',
+        'if e.__ABBootJob == game.JobId then return end',
+        'e.__ABBootJob = game.JobId',
+        'if not game:IsLoaded() then game.Loaded:Wait() end',
+        'repeat task.wait(0.25) until game:GetService("Players").LocalPlayer',
+        'task.wait(1.5)',
+        'for i = 1, 6 do',
+        '    local ok, src = pcall(function() return game:HttpGet("' .. Config.ScriptUrl .. '") end)',
+        '    if ok and type(src) == "string" and #src > 0 then',
+        '        local fn, err = loadstring(src)',
+        '        if fn then',
+        '            local okRun, runErr = pcall(fn)',
+        '            if not okRun then warn("Auto Build runtime error: " .. tostring(runErr)) end',
+        '        else',
+        '            warn("Auto Build load error: " .. tostring(err))',
+        '        end',
+        '        return',
+        '    end',
+        '    task.wait(2)',
+        'end',
+        'warn("Auto Build: could not download the script from the link")',
+    }) do lines[#lines + 1] = l end
+    return table.concat(lines, "\n")
+end
+
+local hopQueued = false
+-- queue the reload line for the NEXT teleport (the search state is embedded at this very moment)
+local function queueForTeleport()
+    local queueFn = getQueueFn()
+    local bootstrap = getBootstrap()
+    if not queueFn or not bootstrap then return false end
+    return (pcall(queueFn, bootstrap))
 end
 
 local function httpGet(url)
@@ -6799,6 +6878,11 @@ local function runFind(token, skipFirstScan)
         saveFindState()
 
         teleportFailed = false
+        if not hopQueued then hopQueued = queueForTeleport() end
+        if not hopQueued then
+            stopFind("queue_on_teleport failed - can't continue between servers", C.bad)
+            return
+        end
         setFindStatus(string.format("Teleporting to a new server...  (hop #%d)", findState.hops), C.accent)
         local ok = pcall(function()
             TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, Players.LocalPlayer)
@@ -6819,10 +6903,6 @@ local function startFind(resuming)
         setFindStatus("Type a slot name first", C.warn)
         return
     end
-    if not hasFS then
-        setFindStatus("This executor has no file functions (writefile/readfile)", C.bad)
-        return
-    end
     local queueFn = getQueueFn()
     if not queueFn then
         setFindStatus("This executor has no queue_on_teleport", C.bad)
@@ -6830,7 +6910,7 @@ local function startFind(resuming)
     end
     local bootstrap = getBootstrap()
     if not bootstrap then
-        setFindStatus("Run InventoryTracker_loader.lua (not the plain script), or set Config.ScriptUrl", C.bad)
+        setFindStatus("Config.ScriptUrl is empty - set the GitHub raw link of this script", C.bad)
         return
     end
 
@@ -6844,19 +6924,6 @@ local function startFind(resuming)
     findState.active = true
     findState.placeId = game.PlaceId
     findState.hopAt = os.time()
-    saveFindState()                       -- keep the name in the local file
-
-    if not queuedThisSession then
-        local ok = pcall(queueFn, bootstrap)
-        if not ok then
-            findState.active = false
-            saveFindState()
-            setFindStatus("queue_on_teleport failed", C.bad)
-            return
-        end
-        queuedThisSession = true
-    end
-
     findToken = findToken + 1
     local token = findToken
     setFinding(true)
@@ -6867,17 +6934,30 @@ end
 
 track(TeleportService.TeleportInitFailed:Connect(function()
     teleportFailed = true
+    hopQueued = false   -- queue a fresh copy (with up-to-date state) for the next attempt
 end))
 
+track(FindUI.btn.MouseButton1Click:Connect(function()
+    FindUI.open = not FindUI.open
+    FindUI.help.Visible = FindUI.open and FindBar.Visible
+end))
 track(FindBtn.MouseButton1Click:Connect(function()
+    if not finding then
+        FindUI.open = false          -- hide the guide once you start a search
+        FindUI.help.Visible = false
+    end
     if finding then
-        stopFind("Stopped.  Saved: \"" .. findState.query .. "\"", C.sub)
+        stopFind("Stopped.  Last search: \"" .. findState.query .. "\"", C.sub)
     else
         startFind(false)
     end
 end))
 track(FindBox.FocusLost:Connect(function(enter)
-    if enter and not finding then startFind(false) end
+    if enter and not finding then
+        FindUI.open = false
+        FindUI.help.Visible = false
+        startFind(false)
+    end
 end))
 
 if findState.query ~= "" then FindBox.Text = findState.query end
@@ -6960,7 +7040,7 @@ do
             saveFindState()
         end
         if findState.query ~= "" then
-            setFindStatus(string.format("Paused. Saved: \"%s\"  -  press Find to continue", findState.query), C.sub)
+            setFindStatus(string.format("Paused. Last search: \"%s\"  -  press Find to continue", findState.query), C.sub)
         end
     end
 end
@@ -6975,20 +7055,28 @@ task.spawn(function()
     pcall(AB.runAutoBuild, Hub.setProgress)
 end)
 
+-- Auto-run after every teleport / server hop: right when a teleport starts, queue ONE line that re-loads this
+-- script from Config.ScriptUrl (plus the running server search, if any). Nothing is saved to disk.
+if Config.AutoRunAfterTeleport then
+    pcall(function()
+        if not getQueueFn() then
+            Hub.status("This executor has no queue_on_teleport - auto-run after teleport is unavailable", "bad")
+            return
+        end
+        if Config.ScriptUrl == "" then return end
+        local lp = Players.LocalPlayer
+        if lp then
+            track(lp.OnTeleport:Connect(function(state)
+                if state == Enum.TeleportState.Started and not hopQueued then
+                    hopQueued = queueForTeleport()
+                end
+            end))
+            Hub.status("Auto-run after teleport: ON", "info")
+        end
+    end)
+end
+
 pcall(function()
     getgenv().__InvTrackerCleanup = cleanup
 end)
 
-]==]
-
-pcall(function() getgenv().__InvTrackerSrc = SRC end)
-pcall(function()
-    if writefile then writefile("AutoBuildHub.lua", SRC) end
-end)
-
-local fn, err = loadstring(SRC)
-if fn then
-    fn()
-else
-    warn("Auto Build Hub load error: " .. tostring(err))
-end
