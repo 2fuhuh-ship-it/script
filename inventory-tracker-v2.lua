@@ -5041,16 +5041,239 @@ do
         showSetup(dbUrl == "")
     end
 
+    ---------------------------------------------------------------- PAGE: AUTO FARM (Build A Boat - CrustyHub farm, merged in)
+    local FarmCtl = {running = false, runId = 0}
+    local function buildFarmPage(page)
+        local TeamsService = game:GetService("Teams")
+        local FARM_CFG_PATH = "SPRB_AutoFarmCfg.json"
+        local STAGE_PATHS = {}
+        for i = 1, 10 do STAGE_PATHS[i] = "Workspace.BoatStages.NormalStages.CaveStage" .. i end
+        local END_PATH = "Workspace.BoatStages.NormalStages.TheEnd.GoldenChest.Trigger"
+        local TEAM_NAMES = {"Black", "Blue", "Green", "Magenta", "Red", "White", "Yellow"}
+
+        local cfg = {speed = 1.2, midEndAfter = 2, switchTeam = true}
+        pcall(function()
+            if isfile and isfile(FARM_CFG_PATH) then
+                local d = HttpService:JSONDecode(readfile(FARM_CFG_PATH))
+                if type(d) == "table" then
+                    if type(d.speed) == "number" then cfg.speed = math.clamp(d.speed, 0.5, 5) end
+                    if type(d.midEndAfter) == "number" then cfg.midEndAfter = math.clamp(math.floor(d.midEndAfter), 0, 10) end
+                    if type(d.switchTeam) == "boolean" then cfg.switchTeam = d.switchTeam end
+                end
+            end
+        end)
+        local function saveCfg()
+            pcall(function() writefile(FARM_CFG_PATH, HttpService:JSONEncode(cfg)) end)
+        end
+
+        -- ===== UI
+        local card = kit.card(page, UDim2.new(0, 8, 0, 8), UDim2.new(1, -16, 0, 190))
+        kit.heading(card, nil, "Auto Farm  (Build A Boat)",
+            "Teleports through the 10 cave stages, grabs the Golden Chest, switches team and repeats.\nIt restarts by itself if your character dies.")
+        local startBtn = kit.button(card, "Start Auto Farm", "primary", UDim2.new(0, 10, 0, 62), UDim2.new(1, -20, 0, 40))
+        local barBg = new("Frame", {Position = UDim2.new(0, 10, 0, 114), Size = UDim2.new(1, -20, 0, 8),
+            BackgroundColor3 = C.line, BackgroundTransparency = 0.5, BorderSizePixel = 0}, card)
+        corner(barBg, "full")
+        local barFill = new("Frame", {Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = C.good, BorderSizePixel = 0}, barBg)
+        corner(barFill, "full")
+        local stateLbl = label({Text = "Offline", Font = FONT_B, TextSize = 12, TextColor3 = C.sub,
+            Position = UDim2.new(0, 10, 0, 130), Size = UDim2.new(1, -20, 0, 16)}, card)
+        local detailLbl = label({Text = "Ready to farm...", TextSize = 11, TextColor3 = C.sub,
+            Position = UDim2.new(0, 10, 0, 148), Size = UDim2.new(1, -20, 0, 16)}, card)
+        local runsLbl = label({Text = "Runs completed: 0", TextSize = 10, TextColor3 = C.sub,
+            Position = UDim2.new(0, 10, 0, 166), Size = UDim2.new(1, -20, 0, 16)}, card)
+
+        local setCard = kit.card(page, UDim2.new(0, 8, 0, 206), UDim2.new(1, -16, 0, 150))
+        kit.heading(setCard, nil, "Farm settings", "Press Enter / click away to apply. Saved automatically.")
+        local row = new("Frame", {Position = UDim2.new(0, 10, 0, 58), Size = UDim2.new(1, -20, 0, 44), BackgroundTransparency = 1}, setCard)
+        new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8),
+            SortOrder = Enum.SortOrder.LayoutOrder}, row)
+        local function field(order, title, key, lo, hi, isInt)
+            local cell = new("Frame", {Size = UDim2.new(0.5, -4, 1, 0), BackgroundTransparency = 1, LayoutOrder = order}, row)
+            label({Text = title, Font = FONT_B, TextSize = 10, TextColor3 = C.sub, TextTruncate = Enum.TextTruncate.AtEnd,
+                Size = UDim2.new(1, 0, 0, 14)}, cell)
+            local box = kit.input(cell, "", tostring(cfg[key]), UDim2.new(0, 0, 0, 16), UDim2.new(1, 0, 0, 28))
+            track(box.FocusLost:Connect(function()
+                local v = tonumber(box.Text)
+                if v then
+                    if isInt then v = math.floor(v) end
+                    cfg[key] = math.clamp(v, lo, hi)
+                    saveCfg()
+                    Hub.status("Saved farm setting: " .. title .. " = " .. tostring(cfg[key]), "good")
+                end
+                box.Text = tostring(cfg[key])
+            end))
+        end
+        field(1, "Speed (1 = normal, 1.2 = 20% faster)", "speed", 0.5, 5, false)
+        field(2, "Visit the end after stage (0 = off)", "midEndAfter", 0, 10, true)
+
+        label({Text = "Switch to a random team after each run", Font = FONT_B, TextSize = 12,
+            Position = UDim2.new(0, 14, 0, 112), Size = UDim2.new(1, -90, 0, 24)}, setCard)
+        kit.switch(setCard, UDim2.new(1, -58, 0, 112), cfg.switchTeam, function(v)
+            cfg.switchTeam = v
+            saveCfg()
+            Hub.status(v and "Farm: team switch ON" or "Farm: team switch OFF", v and "good" or "info")
+        end)
+
+        -- ===== logic
+        local runs = 0
+        local TOTAL = #STAGE_PATHS + 2
+
+        local function setState(text, on)
+            stateLbl.Text = text
+            stateLbl.TextColor3 = on and C.good or C.sub
+        end
+        local function setProg(n, text)
+            tween(barFill, 0.3, {Size = UDim2.new(math.clamp(n / TOTAL, 0, 1), 0, 1, 0)})
+            detailLbl.Text = text
+        end
+
+        local function resolve(path)
+            local cur = game
+            for part in string.gmatch(path, "[^%.]+") do
+                cur = cur and cur:FindFirstChild(part)
+                if not cur then return nil end
+            end
+            return cur
+        end
+
+        local function alive()
+            local c = LP.Character
+            local h = c and c:FindFirstChildOfClass("Humanoid")
+            return c ~= nil and c:FindFirstChild("HumanoidRootPart") ~= nil and h ~= nil and h.Health > 0
+        end
+
+        local function waitRespawn(id)
+            while FarmCtl.running and id == FarmCtl.runId do
+                if alive() then return true end
+                setState("Waiting for respawn...", true)
+                RunService.Heartbeat:Wait()
+            end
+            return false
+        end
+
+        -- teleport to a target and stay `dur` seconds; false = died / stopped
+        local function hold(path, dur, isEnd, id)
+            local t0 = tick()
+            while FarmCtl.running and id == FarmCtl.runId and tick() - t0 < dur do
+                if not alive() then return false end
+                local target = resolve(path)
+                local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+                if target and hrp then
+                    if isEnd then
+                        if target:IsA("BasePart") then hrp.CFrame = target.CFrame + Vector3.new(0, 3, 0) end
+                    else
+                        local dp = target:FindFirstChild("DarknessPart")
+                        if dp then hrp.CFrame = dp.CFrame + Vector3.new(0, 5, 0) end
+                    end
+                end
+                RunService.Heartbeat:Wait()
+            end
+            return FarmCtl.running and id == FarmCtl.runId
+        end
+
+        local function farmLoop()
+            FarmCtl.runId = FarmCtl.runId + 1
+            local id = FarmCtl.runId
+            local needWait = false
+            local function running() return FarmCtl.running and id == FarmCtl.runId end
+            local speed = function() return math.max(cfg.speed, 0.1) end
+
+            while running() do
+                setState("Online - Farming...", true)
+                if needWait or not alive() then
+                    setProg(0, "Waiting for respawn...")
+                    if not waitRespawn(id) then return end
+                    task.wait(3)
+                    needWait = false
+                end
+
+                local died = false
+                for i, path in ipairs(STAGE_PATHS) do
+                    if not running() then return end
+                    setProg(i, "Teleporting to Stage " .. i .. "/" .. #STAGE_PATHS)
+                    if not hold(path, 2 / speed(), false, id) then died = true break end
+                    if cfg.midEndAfter > 0 and i == cfg.midEndAfter then
+                        setProg(i, "Teleporting to End (mid-run)...")
+                        if not hold(END_PATH, 3 / speed(), true, id) then died = true break end
+                    end
+                end
+                if not running() then return end
+
+                if died then
+                    setState("Character died, restarting...", true)
+                    setProg(0, "Respawned, restarting from Stage 1...")
+                    needWait = true
+                else
+                    setProg(TOTAL, "Collecting Golden Chest...")
+                    if hold(END_PATH, 5 / speed(), true, id) then
+                        runs = runs + 1
+                        runsLbl.Text = "Runs completed: " .. runs
+                        if cfg.switchTeam then
+                            local remote = workspace:FindFirstChild("ChangeTeam") or workspace:WaitForChild("ChangeTeam", 3)
+                            local team = TeamsService:FindFirstChild(TEAM_NAMES[math.random(1, #TEAM_NAMES)])
+                            if remote and team then
+                                local before = LP.Character
+                                pcall(function() remote:FireServer(team) end)
+                                setProg(0, "Switching team to " .. team.Name .. "...")
+                                local t0 = tick()
+                                while running() and LP.Character == before and tick() - t0 < 5 do task.wait(0.1) end
+                            end
+                        end
+                    end
+                    needWait = true
+                    task.wait(0.5 / speed())
+                end
+            end
+        end
+
+        local function setRunning(on)
+            if on == FarmCtl.running then return end
+            FarmCtl.running = on
+            if on then
+                startBtn.Text = "Stop Auto Farm"
+                startBtn.BackgroundColor3 = C.bad
+                startBtn:SetAttribute("base", C.bad)
+                startBtn:SetAttribute("kind", "danger")
+                setState("Online", true)
+                Hub.status("Auto Farm: started", "good")
+                task.spawn(function()
+                    local ok, err = pcall(farmLoop)
+                    if not ok then
+                        FarmCtl.running = false
+                        Hub.status("Farm error: " .. tostring(err), "bad")
+                    end
+                end)
+            else
+                FarmCtl.runId = FarmCtl.runId + 1   -- invalidates the running loop
+                startBtn.Text = "Start Auto Farm"
+                startBtn.BackgroundColor3 = C.accent
+                startBtn:SetAttribute("base", C.accent)
+                startBtn:SetAttribute("kind", "primary")
+                setState("Offline", false)
+                setProg(0, "Ready to farm...")
+                Hub.status("Auto Farm: stopped", "info")
+            end
+        end
+        Hub.stopFarm = function() setRunning(false) end   -- called by cleanup() when the hub is closed
+
+        track(startBtn.MouseButton1Click:Connect(function()
+            setRunning(not FarmCtl.running)
+        end))
+    end
+
     ---------------------------------------------------------------- create the tabs
     local buildPage = Hub.addPage("build", "Auto Build", 112)
     local copyPage = Hub.addPage("copy", "Copy Build", 112)
     local chatPage = Hub.addPage("chat", "World Chat", 132)
     Body = Hub.addPage("inventory", "Inventory", 124, "EXT")   -- the old Inventory Tracker lives in this tab
+    local farmPage = Hub.addPage("farm", "Auto Farm", 116, "NEW")
 
     AB.setSink(Hub.status)
     local setProgress, refreshFiles = buildBuildPage(buildPage)
     buildCopyPage(copyPage, refreshFiles)
     buildChatPage(chatPage)
+    buildFarmPage(farmPage)
     Hub.setProgress = setProgress
     Hub.show("build")
 end
@@ -6147,6 +6370,7 @@ end))
 
 local function cleanup()
     if Hub.stopView then pcall(Hub.stopView) end   -- give the camera back
+    if Hub.stopFarm then pcall(Hub.stopFarm) end   -- stop Auto Farm
     findToken = findToken + 1   -- stops a running search loop (in memory only, the file is untouched)
     pcall(AB.clearPreview)
     AB.setSink(nil)
