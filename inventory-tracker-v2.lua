@@ -4656,9 +4656,12 @@ do
             local ok, s = pcall(function()
                 local dt = DateTime.fromUnixTimestampMillis(ms)
                 local old = (os.time() * 1000 - ms) > 86400000
-                return dt:FormatLocalTime(old and "MM/dd HH:mm" or "HH:mm", "zh-tw")
+                return dt:FormatLocalTime(old and "MM/dd HH:mm" or "HH:mm", "en-us")
             end)
-            return ok and s or ""
+            if ok and type(s) == "string" and s ~= "" then return s end
+            -- fallback without DateTime formatting (UTC+8 fixed offset is wrong for other zones, so use os.date)
+            local ok2, s2 = pcall(function() return os.date("%H:%M", math.floor(ms / 1000)) end)
+            return ok2 and s2 or ""
         end
 
         local function appendRow(m)
@@ -4822,15 +4825,38 @@ do
             return cut and text:sub(1, cut - 1) or text
         end
 
-        local function parseMsg(d, isDM)
+        -- Firebase push keys start with an 8-char timestamp (ms since 1970, base-64 digits).
+        -- Used as a reliable time source when a message has no (or a broken) "ts" field.
+        local PUSH_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
+        local function keyTime(key)
+            if type(key) ~= "string" or #key < 8 then return nil end
+            local t = 0
+            for i = 1, 8 do
+                local idx = string.find(PUSH_CHARS, key:sub(i, i), 1, true)
+                if not idx then return nil end
+                t = t * 64 + (idx - 1)
+            end
+            return t
+        end
+
+        local function goodTime(t, nowMs)
+            -- accept only believable values: after 2020 and not more than a day in the future
+            return type(t) == "number" and t > 1577836800000 and t < nowMs + 86400000
+        end
+
+        local function parseMsg(d, isDM, key)
             if type(d) ~= "table" then return nil end
             local uid = tonumber(d.id)
             local text = d.t
             if not uid or type(text) ~= "string" or text == "" then return nil end
             local name = tostring(d.n or "?")
             text = cutChars(text, isDM and DM_SAFETY or WORLD_LIMIT)
+            local nowMs = os.time() * 1000
+            local ts = tonumber(d.ts)
+            if not goodTime(ts, nowMs) then ts = keyTime(key) end
+            if not goodTime(ts, nowMs) then ts = nowMs end   -- fixed at receive time, never changes afterwards
             return {uid = uid, name = name, display = tostring(d.d or name), text = text,
-                ts = tonumber(d.ts), mine = (uid == me.UserId)}
+                ts = ts, mine = (uid == me.UserId)}
         end
 
         local function fetchPath(path, onMsg)
@@ -4850,7 +4876,7 @@ do
                     local id = path .. "/" .. k
                     if not seen[id] and not (lk and k <= lk) then
                         seen[id] = true
-                        local m = parseMsg(data[k], path ~= "world")
+                        local m = parseMsg(data[k], path ~= "world", k)
                         if m then onMsg(m) end
                     end
                     if k > (lastKey[path] or "") then lastKey[path] = k end
