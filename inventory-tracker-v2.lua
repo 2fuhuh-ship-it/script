@@ -2903,6 +2903,40 @@ function API.loadBuild(fName)
     return n
 end
 
+-- how many of each block the loaded build needs vs. how many you own
+-- returns { list = {{name, need, have, parts}...}, totalNeed, totalHave, missingTypes } or nil
+function API.getRequirements()
+    if not currentBuild or not next(currentBuild) then return nil end
+    local sc = Settings.buildScale or 1
+    local list, totalNeed, totalHave, missingTypes = {}, 0, 0, 0
+    for blockName, blocks in pairs(currentBuild) do
+        if type(blocks) == "table" and not Settings.excludedBlocks[blockName] then
+            local regular = isRegularBlock(blockName)
+            local need, parts = 0, 0
+            for _, bi in pairs(blocks) do
+                parts = parts + 1
+                local sz = nil
+                if regular and type(bi) == "table" and bi.Size ~= nil and bi.Size ~= "" then
+                    sz = strV3(bi.Size) * sc
+                end
+                need = need + (regular and calcSlots(sz) or 1)
+            end
+            local okh, have = pcall(getBlockID, blockName)
+            have = (okh and tonumber(have)) or 0
+            totalNeed = totalNeed + need
+            totalHave = totalHave + math.min(have, need)
+            if have < need then missingTypes = missingTypes + 1 end
+            list[#list + 1] = {name = blockName, need = need, have = have, parts = parts}
+        end
+    end
+    table.sort(list, function(a, b)
+        local am, bm = a.have < a.need, b.have < b.need
+        if am ~= bm then return am end
+        return a.name:lower() < b.name:lower()
+    end)
+    return {list = list, totalNeed = totalNeed, totalHave = totalHave, missingTypes = missingTypes}
+end
+
 function API.createPreview()
     if not currentBuild or not next(currentBuild) then return false end
     return createPreview(currentBuild) and true or false
@@ -3293,11 +3327,23 @@ local function getInventoryTemplateData(itemName)
     node = node and node:FindFirstChild("ScrollingFrame")
     node = node and node:FindFirstChild("BlocksFrame")
     local tpl = node and node:FindFirstChild(itemName)
+    if not tpl then
+        -- not in BlocksFrame (functional items live elsewhere): search the whole inventory GUI
+        local inv = lp and lp:FindFirstChildOfClass("PlayerGui")
+        inv = inv and inv:FindFirstChild("BuildGui")
+        inv = inv and inv:FindFirstChild("InventoryFrame")
+        tpl = inv and inv:FindFirstChild(itemName, true)
+    end
     if tpl then
-        local ti = tpl:FindFirstChild("TypeIcon")
-        if ti and ti:IsA("ImageLabel") then typeIconId = ti.Image end
-        if tpl:IsA("ImageButton") then frameImageId = tpl.Image end
-        templateCache[itemName] = {typeIconId, frameImageId}
+        local ti = tpl:FindFirstChild("TypeIcon", true)
+        if ti and ti:IsA("GuiObject") then
+            local okI, img = pcall(function() return ti.Image end)
+            if okI and type(img) == "string" then typeIconId = img end
+        end
+        if tpl:IsA("ImageButton") or tpl:IsA("ImageLabel") then frameImageId = tpl.Image end
+        if typeIconId ~= "" or frameImageId ~= "" then
+            templateCache[itemName] = {typeIconId, frameImageId}
+        end
     end
     return typeIconId, frameImageId
 end
@@ -3422,7 +3468,7 @@ local function stopTracker(player)
 end
 
 -- ========================= UI: WINDOW =========================
-local WIN_W, WIN_H, TITLE_H = 740, 540, 46
+local WIN_W, WIN_H, TITLE_H = 740, 700, 46
 local MARGIN = 10
 local camera = workspace.CurrentCamera
 local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
@@ -3946,6 +3992,7 @@ do
     ---------------------------------------------------------------- PAGE 1: AUTO BUILD
     local function buildBuildPage(page)
         local S, SET = AB.farmSettings, AB.Settings
+        local refreshReq = function() end   -- filled in by the "Required blocks" card below
 
         -- ===== left card: step 1 - choose a build file
         local left = kit.card(page, UDim2.new(0, 8, 0, 8), UDim2.new(0, 300, 1, -16))
@@ -3974,6 +4021,7 @@ do
             else
                 selLabel.Text = name .. (n and ("   |   " .. n .. " blocks") or "")
             end
+            refreshReq()
         end
 
         local rows = {}
@@ -4151,7 +4199,7 @@ do
         end)
 
         -- ===== right column, card C: build settings
-        local cardC = kit.card(page, UDim2.new(0, 316, 0, 250), UDim2.new(1, -324, 1, -258))
+        local cardC = kit.card(page, UDim2.new(0, 316, 0, 250), UDim2.new(1, -324, 0, 168))
         kit.heading(cardC, nil, "Build settings", "Used by Preview and Build. Press Enter / click away to apply.\nEverything is saved automatically.")
         local fields = {
             {"buildScale", "Scale", 1, 0.1, 10},
@@ -4183,13 +4231,127 @@ do
                     SET[key] = v
                     AB.saveSettings()
                     Hub.status("Saved setting: " .. text:match("^%S+") .. " = " .. tostring(v), "good")
+                    refreshReq()
                 end
                 box.Text = tostring(SET[key])
             end))
         end
 
+        -- ===== right column, card D: required blocks (scrollable)
+        local cardD = kit.card(page, UDim2.new(0, 316, 0, 426), UDim2.new(1, -324, 1, -434))
+        label({Text = "Required blocks", Font = FONT_B, TextSize = 14,
+            Position = UDim2.new(0, 14, 0, 7), Size = UDim2.new(0, 130, 0, 20)}, cardD)
+        local reqSummary = label({Text = "", Font = FONT_B, TextSize = 10, TextColor3 = C.sub,
+            TextXAlignment = Enum.TextXAlignment.Right, TextTruncate = Enum.TextTruncate.AtEnd,
+            Position = UDim2.new(0, 144, 0, 7), Size = UDim2.new(1, -156, 0, 20)}, cardD)
+        local reqScroll = new("ScrollingFrame", {
+            Position = UDim2.new(0, 8, 0, 32), Size = UDim2.new(1, -16, 1, -38),
+            BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
+            ScrollBarImageColor3 = C.line, CanvasSize = UDim2.new(0, 0, 0, 0),
+            AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
+        }, cardD)
+        new("UIGridLayout", {CellSize = UDim2.new(0.5, -4, 0, 40), CellPadding = UDim2.new(0, 6, 0, 6),
+            SortOrder = Enum.SortOrder.LayoutOrder}, reqScroll)
+        new("UIPadding", {PaddingRight = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4)}, reqScroll)
+        local reqEmpty = label({Text = "Select a build file to see which blocks it needs.", TextSize = 11,
+            TextColor3 = C.sub, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center,
+            Position = UDim2.new(0, 16, 0, 40), Size = UDim2.new(1, -32, 1, -50)}, cardD)
+
+        local function prettyName(n)
+            local t = n:gsub("Block$", ""):gsub("(%l)(%u)", "%1 %2")
+            t = t:match("^%s*(.-)%s*$")
+            return t ~= "" and t or n
+        end
+
+        local reqSig = nil
+        local function clearReqCells()
+            for _, ch in ipairs(reqScroll:GetChildren()) do
+                if ch:IsA("GuiObject") then ch:Destroy() end
+            end
+        end
+
+        refreshReq = function()
+            local name = S.autoBuildFile or ""
+            local info = (name ~= "" and AB.loadedName() == name) and AB.getRequirements() or nil
+            if not info or #info.list == 0 then
+                if reqSig ~= "empty" then
+                    reqSig = "empty"
+                    clearReqCells()
+                end
+                reqEmpty.Text = (name == "") and "Select a build file to see which blocks it needs."
+                    or "Loading blocks..."
+                reqEmpty.Visible = true
+                reqSummary.Text = ""
+                return
+            end
+            -- only rebuild the cells when something actually changed
+            local parts = {}
+            for _, e in ipairs(info.list) do pcall(getInventoryTemplateData, e.name)
+                parts[#parts + 1] = e.name .. ":" .. e.need .. ":" .. e.have .. (templateCache[e.name] and "i" or "n")
+            end
+            local sig = table.concat(parts, "|")
+            if sig == reqSig then return end
+            reqSig = sig
+            reqEmpty.Visible = false
+            clearReqCells()
+
+            if info.missingTypes == 0 then
+                reqSummary.Text = string.format("%d types  |  all ready", #info.list)
+                reqSummary.TextColor3 = C.good
+            else
+                reqSummary.Text = string.format("%d types  |  %d missing", #info.list, info.missingTypes)
+                reqSummary.TextColor3 = C.bad
+            end
+
+            for i, e in ipairs(info.list) do
+                local enough = e.have >= e.need
+                local col = enough and C.good or C.bad
+                local cell = new("Frame", {BackgroundColor3 = C.card, BorderSizePixel = 0, LayoutOrder = i}, reqScroll)
+                corner(cell, 8)
+                local st = outline(cell, col, 1)
+                st.Transparency = 0.5
+
+                local icon = new("ImageLabel", {BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Fit,
+                    Position = UDim2.new(0, 5, 0, 5), Size = UDim2.new(0, 28, 0, 28),
+                    Image = "rbxassetid://12328114032"}, cell)
+                pcall(function()
+                    -- the block's own picture is the button image; "TypeIcon" is the star badge, so skip it
+                    local _, fi = getInventoryTemplateData(e.name)
+                    if fi and fi ~= "" then icon.Image = fi end
+                end)
+                label({Text = prettyName(e.name), Font = FONT_B, TextSize = 11,
+                    TextTruncate = Enum.TextTruncate.AtEnd,
+                    Position = UDim2.new(0, 39, 0, 3), Size = UDim2.new(1, -44, 0, 16)}, cell)
+                label({Text = string.format("%d need / %d have", e.need, e.have), Font = FONT_M, TextSize = 10,
+                    TextColor3 = col, TextTruncate = Enum.TextTruncate.AtEnd,
+                    Position = UDim2.new(0, 39, 0, 19), Size = UDim2.new(1, -44, 0, 14)}, cell)
+                local bar = new("Frame", {BackgroundColor3 = C.line, BackgroundTransparency = 0.4, BorderSizePixel = 0,
+                    Position = UDim2.new(0, 8, 1, -4), Size = UDim2.new(1, -16, 0, 2)}, cell)
+                corner(bar, "full")
+                local fill = new("Frame", {BackgroundColor3 = col, BorderSizePixel = 0,
+                    Size = UDim2.new(math.clamp(e.have / math.max(e.need, 1), 0, 1), 0, 1, 0)}, bar)
+                corner(fill, "full")
+            end
+        end
+
+        -- keep the counts live while you collect blocks
+        task.spawn(function()
+            while cardD.Parent do
+                task.wait(2)
+                pcall(refreshReq)
+            end
+        end)
+
         populate()
         showSelected(nil)
+        -- a file was already chosen last session: load it so the required blocks show up right away
+        if (S.autoBuildFile or "") ~= "" and AB.loadedName() ~= S.autoBuildFile then
+            task.spawn(function()
+                local name = S.autoBuildFile
+                local ok, n = pcall(AB.loadBuild, name)
+                if ok and n and S.autoBuildFile == name then showSelected(n) end
+            end)
+        end
         return setProgress, populate
     end
 
